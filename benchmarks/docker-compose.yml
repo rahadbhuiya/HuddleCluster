@@ -1,0 +1,72 @@
+version: "3.9"
+
+services:
+  #  Upstream servers 
+  upstream-s0:
+    build: .
+    command: python upstream_server.py --port 8000 --latency 12 --id s0
+    ports: ["8001:8000"]
+    networks: [huddle-net]
+
+  upstream-s1:
+    build: .
+    command: python upstream_server.py --port 8000 --latency 14 --id s1
+    ports: ["8002:8000"]
+    networks: [huddle-net]
+
+  upstream-s2:
+    build: .
+    command: python upstream_server.py --port 8000 --latency 16 --id s2
+    ports: ["8003:8000"]
+    networks: [huddle-net]
+
+  upstream-s3:
+    build: .
+    command: python upstream_server.py --port 8000 --latency 18 --id s3
+    ports: ["8004:8000"]
+    networks: [huddle-net]
+
+  upstream-s4:
+    build: .
+    command: python upstream_server.py --port 8000 --latency 20 --id s4
+    ports: ["8005:8000"]
+    networks: [huddle-net]
+
+  upstream-s5:
+    build: .
+    command: python upstream_server.py --port 8000 --latency 22 --id s5
+    ports: ["8006:8000"]
+    networks: [huddle-net]
+
+  #  NGINX load balancer 
+  nginx-rr:
+    image: nginx:alpine
+    volumes:
+      - ./nginx/nginx_rr.conf:/etc/nginx/nginx.conf:ro
+    ports: ["9001:80"]
+    depends_on:
+      - upstream-s0
+      - upstream-s1
+      - upstream-s2
+      - upstream-s3
+      - upstream-s4
+      - upstream-s5
+    networks: [huddle-net]
+
+  nginx-lc:
+    image: nginx:alpine
+    volumes:
+      - ./nginx/nginx_lc.conf:/etc/nginx/nginx.conf:ro
+    ports: ["9002:80"]
+    depends_on:
+      - upstream-s0
+      - upstream-s1
+      - upstream-s2
+      - upstream-s3
+      - upstream-s4
+      - upstream-s5
+    networks: [huddle-net]
+
+networks:
+  huddle-net:
+    driver: bridge

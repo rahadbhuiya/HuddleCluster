@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# Benchmark outputs (generated, not committed)
+benchmark_results.png
+benchmark_fairness.png
+statistical_summary.png
+statistical_results.json
+convergence_analysis.png
+overhead_analysis.png
+http_benchmark_results.png
+http_benchmark_results.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
