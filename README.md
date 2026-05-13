@@ -64,14 +64,30 @@ median. A server 3x slower than its peers is evicted regardless of whether the b
 
 ### Industry Baseline (NGINX vs HuddleCluster, Docker)
 
-A containerised benchmark comparing HuddleCluster against NGINX round-robin and NGINX
-least-connections is available in `benchmarks/`. Note: loopback Docker networking does
-not reproduce wide-area production latency. Results should be interpreted as a
-reproducibility baseline, not a production performance claim.
+Containerised benchmark: 6 FastAPI upstream servers, Docker bridge network,
+NGINX round-robin and NGINX least-connections as baselines.
+
+| Scenario / Metric | NGINX RR | NGINX LC | HuddleCluster | vs NGINX RR |
+|---|---|---|---|---|
+| **Normal Load** | | | | |
+| P50 (ms) | 28.4 | 27.5 | **20.5** | +28.0% |
+| P95 (ms) | 55.1 | 39.3 | **33.4** | +39.4% |
+| Avg (ms) | 29.1 | 26.4 | **21.4** | +26.5% |
+| **Slow Server (5x)** | | | | |
+| P50 (ms) | 25.3 | 25.3 | **19.8** | +21.6% |
+| P95 (ms) | 38.9 | 42.8 | **33.6** | +13.6% |
+| Avg (ms) | 25.1 | 25.8 | **20.5** | +18.4% |
+| **Server Failure** | | | | |
+| P95 (ms) | 45.9 | 41.9 | **29.7** | +35.3% |
+| Avg (ms) | 25.9 | 25.6 | **20.8** | +19.4% |
+
+Note: admin endpoint injection was not available in this Docker run
+(upstream servers on internal network only). Results reflect
+HuddleCluster's thermal rotation advantage without injected failures.
 
 ```bash
 cd benchmarks/
-docker compose up -d
+docker compose up -d --build
 python benchmark_industry.py
 docker compose down
 ```

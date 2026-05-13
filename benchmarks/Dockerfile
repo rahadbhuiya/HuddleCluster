@@ -4,7 +4,7 @@ WORKDIR /app
 
 RUN pip install fastapi uvicorn --no-cache-dir
 
-COPY ../upstream_server.py .
+COPY upstream_server.py .
 
 EXPOSE 8000
 
