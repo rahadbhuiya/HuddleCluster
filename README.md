@@ -5,7 +5,7 @@ A penguin-inspired, self-organizing server load balancer with adaptive thermal e
 **Author:** Rahad Bhuiya
 **Version:** 1.3.0
 **License:** MIT
-**Paper:** [HuddleCluster: A Penguin-Inspired Self-Organizing Load Balancer with Adaptive Thermal Eviction](https://github.com/rahadbhuiya/HuddleCluster/blob/main/docs/HuddleCluster_Paper.pdf)
+**Paper:** [HuddleCluster: A Penguin-Inspired Self-Organizing Load Balancer with Adaptive Thermal Eviction](https://github.com/rahadbhuiya/HuddleCluster/blob/main/docs/HuddleCluster.pdf)
 
 ---
 
