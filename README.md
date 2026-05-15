@@ -3,11 +3,16 @@
 A penguin-inspired, self-organizing server load balancer with adaptive thermal eviction.
 
 **Author:** Rahad Bhuiya
-**Version:** 1.3.0
+**Version:** 1.3.2
 **License:** MIT
 **Paper:** [HuddleCluster: A Penguin-Inspired Self-Organizing Load Balancer with Adaptive Thermal Eviction](https://github.com/rahadbhuiya/HuddleCluster/blob/main/docs/HuddleCluster.pdf)
 
 ---
+
+[![PyPI version](https://badge.fury.io/py/huddle-cluster.svg)](https://pypi.org/project/huddle-cluster/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Downloads](https://img.shields.io/pypi/dm/huddle-cluster.svg)](https://pypi.org/project/huddle-cluster/)
 
 ## The Idea
 
@@ -107,6 +112,8 @@ docker compose down
 ## Quick Start
 
 ```bash
+pip install huddle-cluste
+or
 pip install -e .
 # with benchmark dependencies:
 pip install -e ".[benchmark]"
