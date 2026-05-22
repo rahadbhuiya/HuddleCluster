@@ -4,21 +4,21 @@
 # All core features use Python standard library only:
 #   heapq, threading, collections, dataclasses, statistics, logging, time, enum
 
-# ---------------------------------------------------------------------------
+
 # FastAPI Integration (examples/fastapi_example.py)
-# ---------------------------------------------------------------------------
+
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
 httpx>=0.27.0
 pydantic>=2.7.0
 
-# ---------------------------------------------------------------------------
+
 # Terminal Simulation (examples/simulation.py) — optional
-# ---------------------------------------------------------------------------
+
 rich>=13.7.0
 
-# ---------------------------------------------------------------------------
+
 # Testing
-# ---------------------------------------------------------------------------
+
 pytest>=8.2.0
 pytest-timeout>=2.3.0       # guards against deadlock in stress tests

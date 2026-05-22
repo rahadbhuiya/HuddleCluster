@@ -1,6 +1,6 @@
 \documentclass[10pt,twocolumn]{article}
 
-% ── Packages ──────────────────────────────────────────────────────────────────
+%  Packages 
 \usepackage[margin=1in]{geometry}
 \usepackage{times}
 \usepackage{graphicx}
@@ -40,7 +40,7 @@
 \definecolor{resultgreen}{RGB}{21,128,61}
 \definecolor{resultorange}{RGB}{180,90,0}
 
-% ── Title ─────────────────────────────────────────────────────────────────────
+%  Title 
 \title{%
     \textbf{HuddleCluster: A Penguin-Inspired Self-Organizing}\\
     \textbf{Load Balancer with Adaptive Thermal Eviction}%
@@ -54,12 +54,12 @@
 
 \date{}
 
-% ── Document ──────────────────────────────────────────────────────────────────
+%  Document 
 \begin{document}
 
 \maketitle
 
-% ── Abstract ──────────────────────────────────────────────────────────────────
+%  Abstract 
 \begin{abstract}
 We present \textsc{HuddleCluster}, a load-balancing algorithm inspired by the
 thermoregulatory huddle behaviour of Emperor Penguins
@@ -100,7 +100,7 @@ biologically-inspired computing, adaptive scheduling, anomaly detection,
 fairness.
 \end{abstract}
 
-% ── I. Introduction ───────────────────────────────────────────────────────────
+%  I. Introduction 
 \section{Introduction}
 \label{sec:intro}
 
@@ -142,7 +142,7 @@ Our primary contributions are:
       statistical significance testing.
 \end{enumerate}
 
-% ── II. Background ────────────────────────────────────────────────────────────
+%  II. Background 
 \section{Background and Related Work}
 \label{sec:background}
 
@@ -185,7 +185,7 @@ These systems require significant infrastructure investment.
 zero-dependency algorithm that self-adapts using only observable request
 latency via a \texttt{record\_latency()} feedback API.
 
-% ── III. Algorithm Design ─────────────────────────────────────────────────────
+%  III. Algorithm Design 
 \section{Algorithm Design}
 \label{sec:design}
 
@@ -371,7 +371,7 @@ $\theta_h \;\backslash\; \alpha$ & 0.3 & 0.6 (default) & 0.9 \\
 \end{tabular}
 \end{table}
 
-% ── IV. Implementation ────────────────────────────────────────────────────────
+%  IV. Implementation 
 \section{Implementation}
 \label{sec:impl}
 
@@ -411,7 +411,7 @@ temperature, rotation count, inner time, average latency, and P95 latency.
 \texttt{prometheus\_metrics()} returns Prometheus text format for
 \texttt{/metrics} endpoint integration.
 
-% ── V. Evaluation ─────────────────────────────────────────────────────────────
+%  V. Evaluation 
 \section{Evaluation}
 \label{sec:eval}
 
@@ -596,7 +596,7 @@ load, as expected: when all servers receive equal load, relative anomaly
 scores remain near zero and no eviction fires.
 This is a documented boundary condition of the relative-scoring design.
 
-% ── VI. Limitations ───────────────────────────────────────────────────────────
+%  VI. Limitations 
 \section{Limitations and Future Work}
 \label{sec:limits}
 
@@ -617,7 +617,7 @@ Planned extensions include adaptive threshold tuning
 weighted server capacity, cold-start protection, and a Prometheus
 metrics exporter (all implemented in v1.3.0).
 
-% ── VII. Conclusion ───────────────────────────────────────────────────────────
+%  VII. Conclusion 
 \section{Conclusion}
 \label{sec:conclusion}
 
@@ -641,7 +641,7 @@ biologically-inspired primitives in this domain.
 The implementation is available at
 \url{https://github.com/rahadbhuiya/HuddleCluster}.
 
-% ── References ────────────────────────────────────────────────────────────────
+%  References 
 \balance
 \bibliographystyle{plain}
 \begin{thebibliography}{99}

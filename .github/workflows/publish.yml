@@ -1,0 +1,110 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*.*.*"   # triggers on v1.3.3, v1.4.0, etc.
+
+jobs:
+  test:
+    name: Run tests before publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install and test
+        run: |
+          pip install -e .
+          python -m unittest tests/test_rotation.py tests/test_fairness.py -v
+
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build
+        run: pip install build
+
+      - name: Build wheel and sdist
+        run: python -m build
+
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: pypi
+      url: https://pypi.org/project/huddle-cluster/
+    permissions:
+      id-token: write   # required for trusted publishing
+
+    steps:
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # Uses PyPI Trusted Publishing (no API token needed)
+        # Setup: PyPI -> Your project -> Publishing -> Add publisher
+        # GitHub owner: rahadbhuiya
+        # GitHub repo:  HuddleCluster
+        # Workflow:     publish.yml
+
+  github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: publish
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Extract changelog entry
+        id: changelog
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          # Extract the section for this version from CHANGELOG.md
+          awk "/## \[$VERSION\]/,/## \[/" CHANGELOG.md \
+            | head -n -1 \
+            | tail -n +2 > release_notes.txt
+          echo "Release notes extracted"
+          cat release_notes.txt
+
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "HuddleCluster v${{ steps.version.outputs.VERSION }}"
+          body_path: release_notes.txt
+          files: dist/*
+          draft: false
+          prerelease: false

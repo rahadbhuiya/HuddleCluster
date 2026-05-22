@@ -231,7 +231,7 @@ def fresh_cluster(servers, **kwargs):
 
 
 def scenario_normal():
-    print("\n SCENARIO 1: Normal Load (baseline)")
+    print("\n  SCENARIO 1: Normal Load (baseline)")
     N = 400
 
     # Round Robin
@@ -259,12 +259,13 @@ def scenario_normal():
 
 # SCENARIO 2 — One Server Goes Slow at Halfway
 
+
 def scenario_slow_server():
-    print("\n SCENARIO 2: Slow Server (5x latency at halfway mark)")
+    print("\n  SCENARIO 2: Slow Server (5x latency at halfway mark)")
     N = 400
 
     def inject_slow(fake_servers):
-        print("   s2 is now 5x SLOW")
+        print("     ⚡ s2 is now 5x SLOW")
         fake_servers[2].is_slow = True
 
     # Round Robin
@@ -287,8 +288,6 @@ def scenario_slow_server():
     hc_r["fairness"] = cluster.fairness_score()
 
     return rr_r, lc_r, hc_r
-
-
 
 # SCENARIO 3 — Traffic Spike (3x burst at halfway)
 
@@ -392,12 +391,11 @@ def scenario_traffic_spike():
     return rr_r, lc_r, hc_r
 
 
-
 # SCENARIO 4 — Server Failure (crash at halfway)
 
 
 def scenario_server_failure():
-    print("\n SCENARIO 4: Server Failure (s1 crashes at halfway mark)")
+    print("\n  SCENARIO 4: Server Failure (s1 crashes at halfway mark)")
     N = 300
 
     def inject_failure(fake_servers):
@@ -536,8 +534,8 @@ def plot_results(all_results, names):
     fig.savefig("benchmark_results.png",     dpi=150, bbox_inches="tight")
     fig2.savefig("benchmark_fairness.png",   dpi=150, bbox_inches="tight")
 
-    print("\n Saved: benchmark_results.png")
-    print(" Saved: benchmark_fairness.png")
+    print("\n  Saved: benchmark_results.png")
+    print("  Saved: benchmark_fairness.png")
     plt.show()
 
 
@@ -547,7 +545,7 @@ def plot_results(all_results, names):
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("   HuddleCluster Benchmark Suite v1.1.0")
+    print("    HuddleCluster Benchmark Suite v1.1.0")
     print("  4 scenarios — ~8-12 minutes total")
     print("=" * 60)
 

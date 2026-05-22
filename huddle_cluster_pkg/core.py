@@ -14,8 +14,23 @@ Rotation Rules:
   - No central coordinator needed — threshold-driven, self-organizing
 
 Author : Rahad Bhuiya (inspired by Penguin Biology)
-Version: 1.2.0
+Version: 1.3.0
 License: MIT
+
+Changelog v1.3.0
+-----------------
+  NEW  Absolute latency floor (absolute_latency_floor_ms) -- evict servers
+       exceeding this absolute latency regardless of relative anomaly score.
+       Guards against majority degradation where median rises above acceptable.
+  NEW  Cold start protection (cold_start_sec) -- new servers warm up in outer
+       ring for configurable period before inner-ring promotion.
+  NEW  Weighted server capacity (weight on Server) -- servers with higher
+       weight tolerate more load before eviction. weight=2.0 needs 2x heat.
+  NEW  Adaptive thresholds (adaptive_thresholds=True) -- heat/cool thresholds
+       auto-adjust based on cluster P95 latency history.
+  NEW  Prometheus exporter -- prometheus_metrics() returns /metrics text.
+  NEW  Gossip protocol (GossipAgent) -- UDP multicast temperature sharing
+       for distributed multi-node deployments.
 
 Changelog v1.2.0
 -----------------
@@ -51,15 +66,19 @@ Changelog v1.1.0
 from __future__ import annotations
 
 import heapq
+import json
 import logging
+import math
+import socket
 import statistics
+import struct
 import threading
 import time
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Generator, Optional
+from typing import Callable, Generator, List, Optional
 
 #  Logging Setup 
 
@@ -80,9 +99,10 @@ class Position(Enum):
 
 
 class EvictionReason(Enum):
-    OVERHEATED  = "overheated"    # CPU/memory/connections/latency too high
-    MANUAL      = "manual"        # Operator forced eviction
-    HEALTH_FAIL = "health_fail"   # Health check failed
+    OVERHEATED       = "overheated"
+    MANUAL           = "manual"
+    HEALTH_FAIL      = "health_fail"
+    ABSOLUTE_LATENCY = "absolute_latency"   # v1.3.0: exceeded floor threshold
 
 
 @dataclass
@@ -155,7 +175,7 @@ class ServerMetrics:
 class RotationEvent:
     timestamp:   float
     server_id:   str
-    direction:   str          # "inner→outer" or "outer→inner"
+    direction:   str          # "inner->outer" or "outer->inner"
     reason:      str
     temperature: float
 
@@ -192,24 +212,42 @@ class Server:
     # Can be overridden per-instance via HuddleCluster(ema_alpha=...)
     _EMA_ALPHA = 0.25
 
-    def __init__(self, id: str, host: str, port: int):
-        self.id   = id
-        self.host = host
-        self.port = port
+    def __init__(self, id: str, host: str, port: int, weight: float = 1.0):
+        """
+        weight (v1.3.0): capacity multiplier. A server with weight=2.0 needs
+        to reach 2x the base heat_threshold before eviction. Use for larger
+        instances that can handle proportionally more load.
+        """
+        if weight <= 0:
+            raise ValueError("weight must be > 0")
+        self.id     = id
+        self.host   = host
+        self.port   = port
+        self.weight = weight   # v1.3.0: capacity multiplier
 
-        self.metrics:  ServerMetrics = ServerMetrics()
-        self.position: Position      = Position.OUTER
-        self.temperature: float      = 0.0   # EMA-smoothed composite score
+        self.metrics:     ServerMetrics = ServerMetrics()
+        self.position:    Position      = Position.OUTER
+        self.temperature: float         = 0.0
 
-        # Timing & fairness tracking
         self.last_rotated:     float = time.monotonic()
         self.total_inner_time: float = 0.0
         self.total_outer_time: float = 0.0
         self.rotation_count:   int   = 0
 
-        # FIX (Flapping): track consecutive rotations for back-off
-        self._consecutive_evictions: int = 0
+        self._consecutive_evictions: int   = 0
+        self._cold_until:            float = 0.0   # v1.3.0: cold-start timestamp
         self._lock = threading.Lock()
+
+    def is_cold_start(self) -> bool:
+        """v1.3.0: True if server is still in cold-start protection period."""
+        return time.monotonic() < self._cold_until
+
+    def effective_heat_threshold(self, base_threshold: float) -> float:
+        """
+        v1.3.0: Weighted eviction threshold.
+        weight=2.0 -> server needs temp >= base_threshold*2.0 to be evicted.
+        """
+        return min(1.0, base_threshold * self.weight)
 
     #  Temperature 
 
@@ -249,7 +287,7 @@ class Server:
         return self.temperature
 
     def is_overheated(self, threshold: float) -> bool:
-        return self.temperature >= threshold
+        return self.temperature >= self.effective_heat_threshold(threshold)
 
     def is_cooled(self, cooldown_threshold: float) -> bool:
         return self.temperature <= cooldown_threshold
@@ -324,15 +362,20 @@ class HuddleCluster:
 
     def __init__(
         self,
-        heat_threshold:        float    = DEFAULT_HEAT_THRESHOLD,
-        cool_threshold:        float    = DEFAULT_COOL_THRESHOLD,
-        min_inner_size:        int      = DEFAULT_MIN_INNER,
-        max_inner_size:        int      = DEFAULT_MAX_INNER,
-        rotation_cooldown_sec: float    = DEFAULT_ROTATION_COOLDOWN,
-        min_outer_dwell_sec:   float    = DEFAULT_MIN_OUTER_DWELL,
-        ema_alpha:             float    = DEFAULT_EMA_ALPHA,
-        metrics_updater:       Optional[Callable[[Server], None]] = None,
-        on_rotation:           Optional[Callable[[RotationEvent], None]] = None,
+        heat_threshold:            float    = DEFAULT_HEAT_THRESHOLD,
+        cool_threshold:            float    = DEFAULT_COOL_THRESHOLD,
+        min_inner_size:            int      = DEFAULT_MIN_INNER,
+        max_inner_size:            int      = DEFAULT_MAX_INNER,
+        rotation_cooldown_sec:     float    = DEFAULT_ROTATION_COOLDOWN,
+        min_outer_dwell_sec:       float    = DEFAULT_MIN_OUTER_DWELL,
+        ema_alpha:                 float    = DEFAULT_EMA_ALPHA,
+        # v1.3.0 new parameters
+        absolute_latency_floor_ms: Optional[float] = None,
+        cold_start_sec:            float    = 0.0,
+        adaptive_thresholds:       bool     = False,
+        gossip_agent:              Optional["GossipAgent"] = None,
+        metrics_updater:           Optional[Callable[[Server], None]] = None,
+        on_rotation:               Optional[Callable[[RotationEvent], None]] = None,
     ):
         #  Validation 
         if cool_threshold >= heat_threshold:
@@ -355,8 +398,22 @@ class HuddleCluster:
         self.rotation_cooldown_sec = rotation_cooldown_sec
         self.min_outer_dwell_sec   = min_outer_dwell_sec
         self.ema_alpha             = ema_alpha
-        self._metrics_updater      = metrics_updater
-        self._on_rotation          = on_rotation
+        self.absolute_latency_floor_ms = absolute_latency_floor_ms
+        self.cold_start_sec            = cold_start_sec
+        self._gossip_agent             = gossip_agent
+        self._metrics_updater          = metrics_updater
+        self._on_rotation              = on_rotation
+
+        # Adaptive thresholds controller (v1.3.0)
+        self._adaptive: Optional[AdaptiveThresholdController] = (
+            AdaptiveThresholdController(
+                base_heat=heat_threshold,
+                base_cool=cool_threshold,
+            ) if adaptive_thresholds else None
+        )
+
+        # P95 tracking window for adaptive thresholds + Prometheus
+        self._p95_window: deque = deque(maxlen=100)
 
         #  Data Structures 
         self._inner_ring: deque[Server] = deque()
@@ -378,10 +435,13 @@ class HuddleCluster:
         self._rotation_thread: Optional[threading.Thread] = None
 
         log.info(
-            "HuddleCluster initialized — "
+            "HuddleCluster initialized -- "
             f"heat={heat_threshold}, cool={cool_threshold}, "
             f"inner=[{min_inner_size}..{max_inner_size}], "
-            f"ema_alpha={ema_alpha}"
+            f"ema_alpha={ema_alpha}, "
+            f"floor={absolute_latency_floor_ms}ms, "
+            f"cold_start={cold_start_sec}s, "
+            f"adaptive={adaptive_thresholds}"
         )
 
     #  Server Registration 
@@ -392,16 +452,26 @@ class HuddleCluster:
         If force_inner=True and inner ring has space, place it there directly.
         Otherwise it starts in the outer ring.
         """
-        server._EMA_ALPHA = self.ema_alpha   # inherit cluster-level EMA setting
+        server._EMA_ALPHA = self.ema_alpha
         with self._lock:
+            # v1.3.0: cold start protection -- always start in outer
+            if self.cold_start_sec > 0:
+                server._cold_until = time.monotonic() + self.cold_start_sec
+                server.position    = Position.OUTER
+                heapq.heappush(self._outer_ring, server)
+                log.info(
+                    f"Added {server.id!r} -> outer ring "
+                    f"(cold start, eligible in {self.cold_start_sec:.0f}s)"
+                )
+                return
             if force_inner and len(self._inner_ring) < self.max_inner_size:
                 server.position = Position.INNER
                 self._inner_ring.append(server)
-                log.info(f"Added {server.id!r} → inner ring")
+                log.info(f"Added {server.id!r} -> inner ring")
             else:
                 server.position = Position.OUTER
                 heapq.heappush(self._outer_ring, server)
-                log.info(f"Added {server.id!r} → outer ring")
+                log.info(f"Added {server.id!r} -> outer ring")
 
     def remove_server(self, server_id: str) -> bool:
         """
@@ -478,9 +548,18 @@ class HuddleCluster:
         avgs = [s.metrics.avg_response_ms for s in inner if s.metrics.avg_response_ms > 0]
         cluster_baseline = statistics.median(avgs) if avgs else latency_ms
 
-        # Update anomaly score for the affected server only (cheap)
         server.metrics.update_latency_anomaly(cluster_baseline)
         server.update_temperature()
+
+        # Feed adaptive threshold controller (v1.3.0)
+        with self._lock:
+            inner_snap = list(self._inner_ring)
+        p95_vals = [s.metrics.p95_latency() for s in inner_snap if s.metrics.p95_latency() > 0]
+        if p95_vals:
+            cluster_p95 = statistics.mean(p95_vals)
+            self._p95_window.append(cluster_p95)
+            if self._adaptive:
+                self._adaptive.record_p95(cluster_p95)
 
     @contextmanager
     def get_server_context(self) -> Generator[Optional[Server], None, None]:
@@ -557,28 +636,39 @@ class HuddleCluster:
           - min_outer_dwell_sec: minimum time in outer before re-entry
           - hysteresis gap: heat_threshold >> cool_threshold
         """
+        # v1.3.0: update adaptive thresholds before rotation
+        if self._adaptive:
+            self.heat_threshold, self.cool_threshold = self._adaptive.maybe_adapt()
+
         with self._lock:
             rotated = False
+            now     = time.monotonic()
 
-            # Step 1: Evict overheated inner servers
-            # FIX (Operator Precedence Bug): explicit parentheses
-            now = time.monotonic()
-            candidates = [
-                s for s in list(self._inner_ring)
-                if s.is_overheated(self.heat_threshold)
-                and (
-                    not s.metrics.is_healthy
-                    or (now - s.last_rotated) >= self.rotation_cooldown_sec
+            # Step 1: Evict overheated OR floor-breaching inner servers
+            candidates = []
+            for s in list(self._inner_ring):
+                cooldown_ok  = (now - s.last_rotated) >= self.rotation_cooldown_sec
+                overheated   = s.is_overheated(self.heat_threshold)
+                unhealthy    = not s.metrics.is_healthy
+
+                # v1.3.0: absolute latency floor -- evict regardless of anomaly
+                floor_breach = (
+                    self.absolute_latency_floor_ms is not None
+                    and s.metrics.avg_response_ms > 0
+                    and s.metrics.avg_response_ms > self.absolute_latency_floor_ms
                 )
-            ]
 
-            # FIX (Thundering Herd): cap evictions to 1/3 of ring
+                if floor_breach and (unhealthy or cooldown_ok):
+                    candidates.append((s, EvictionReason.ABSOLUTE_LATENCY))
+                elif overheated and (unhealthy or cooldown_ok):
+                    candidates.append((s, EvictionReason.OVERHEATED))
+
             max_evict  = max(1, len(self._inner_ring) // 3)
             safe_evict = len(self._inner_ring) - self.min_inner_size
             to_evict   = candidates[: min(max_evict, max(0, safe_evict))]
 
-            for server in to_evict:
-                self._move_to_outer(server, EvictionReason.OVERHEATED)
+            for server, reason in to_evict:
+                self._move_to_outer(server, reason)
                 rotated = True
 
             # Step 2: Pull cooled outer servers into inner
@@ -589,7 +679,10 @@ class HuddleCluster:
                 coolest    = self._outer_ring[0]
                 dwell_time = time.monotonic() - coolest.last_rotated
 
-                # FIX (Flapping): must have dwelt in outer long enough
+                # v1.3.0: cold-start protection gate
+                if coolest.is_cold_start():
+                    break
+
                 if dwell_time < self.min_outer_dwell_sec:
                     break
 
@@ -614,11 +707,16 @@ class HuddleCluster:
     def _move_to_outer(self, server: Server, reason: EvictionReason) -> None:
         now     = time.monotonic()
         elapsed = now - server.last_rotated
-        server.total_inner_time          += elapsed
-        server.position                   = Position.OUTER
-        server.last_rotated               = now
-        server.rotation_count            += 1
-        server._consecutive_evictions    += 1
+        server.total_inner_time       += elapsed
+        server.position                = Position.OUTER
+        server.last_rotated            = now
+        server.rotation_count         += 1
+        server._consecutive_evictions += 1
+
+        # v1.3.0: floor-breach evictions forcibly raise temperature so the
+        # server does not immediately pass the cool_threshold and re-enter.
+        if reason == EvictionReason.ABSOLUTE_LATENCY:
+            server.temperature = max(server.temperature, 0.8)
 
         self._inner_ring.remove(server)
         heapq.heappush(self._outer_ring, server)
@@ -626,7 +724,7 @@ class HuddleCluster:
         event = RotationEvent(
             timestamp=time.time(),
             server_id=server.id,
-            direction="inner→outer",
+            direction="inner->outer",
             reason=reason.value,
             temperature=server.temperature,
         )
@@ -654,7 +752,7 @@ class HuddleCluster:
         event = RotationEvent(
             timestamp=time.time(),
             server_id=server.id,
-            direction="outer→inner",
+            direction="outer->inner",
             reason="cooled",
             temperature=server.temperature,
         )
@@ -675,7 +773,7 @@ class HuddleCluster:
         ):
             s = heapq.heappop(self._outer_ring)
             self._move_to_inner(s)
-            log.info(f"↑ Pulled {s.id!r} to maintain min_inner ({reason})")
+            log.info(f"Pulled {s.id!r} to maintain min_inner ({reason})")
 
     #  Background Rotation Daemon 
 
@@ -692,14 +790,18 @@ class HuddleCluster:
             daemon=True,
         )
         self._rotation_thread.start()
-        log.info(f"🐧 HuddleCluster started (interval={rotation_interval_sec}s)")
+        if self._gossip_agent:
+            self._gossip_agent.start(self)
+        log.info(f"HuddleCluster started (interval={rotation_interval_sec}s)")
 
     def stop(self, timeout: float = 5.0) -> None:
         """Gracefully stop the rotation daemon."""
         self._running = False
         if self._rotation_thread and self._rotation_thread.is_alive():
             self._rotation_thread.join(timeout=timeout)
-        log.info("🐧 HuddleCluster stopped")
+        if self._gossip_agent:
+            self._gossip_agent.stop()
+        log.info("HuddleCluster stopped")
 
     def _rotation_loop(self, interval: float) -> None:
         while self._running:
@@ -767,21 +869,25 @@ class HuddleCluster:
             "status":        "degraded" if len(inner) < self.min_inner_size else "healthy",
             "inner_ring": [
                 {
-                    "id":               s.id,
-                    "temp":             round(s.temperature, 4),
-                    "rotations":        s.rotation_count,
-                    "inner_time_sec":   round(s.total_inner_time, 2),
-                    "avg_latency_ms":   round(s.metrics.avg_response_ms, 2),
-                    "p95_latency_ms":   round(s.metrics.p95_latency(), 2),
+                    "id":             s.id,
+                    "weight":         s.weight,
+                    "temp":           round(s.temperature, 4),
+                    "rotations":      s.rotation_count,
+                    "inner_time_sec": round(s.total_inner_time, 2),
+                    "avg_latency_ms": round(s.metrics.avg_response_ms, 2),
+                    "p95_latency_ms": round(s.metrics.p95_latency(), 2),
+                    "anomaly_score":  round(s.metrics.latency_anomaly_score, 4),
                 }
                 for s in inner
             ],
             "outer_ring": [
                 {
                     "id":             s.id,
+                    "weight":         s.weight,
                     "temp":           round(s.temperature, 4),
                     "outer_time_sec": round(s.total_outer_time, 2),
                     "avg_latency_ms": round(s.metrics.avg_response_ms, 2),
+                    "cold_start":     s.is_cold_start(),
                 }
                 for s in outer
             ],
@@ -802,6 +908,85 @@ class HuddleCluster:
                 for e in list(self._rotation_log)[-10:]
             ],
         }
+
+
+    def prometheus_metrics(self) -> str:
+        """
+        v1.3.0 -- Prometheus text exposition format for /metrics endpoint.
+
+        Example FastAPI integration:
+            @app.get("/metrics", response_class=PlainTextResponse)
+            def metrics():
+                return cluster.prometheus_metrics()
+        """
+        lines = [
+            "# HELP huddle_server_temperature EMA temperature score (0=cool, 1=hot)",
+            "# TYPE huddle_server_temperature gauge",
+        ]
+        for s in self.all_servers():
+            lines.append(
+                f'huddle_server_temperature{{server="{s.id}",ring="{s.position.value}"}} '
+                f"{s.temperature:.4f}"
+            )
+        lines += [
+            "",
+            "# HELP huddle_server_avg_latency_ms Rolling average response latency",
+            "# TYPE huddle_server_avg_latency_ms gauge",
+        ]
+        for s in self.all_servers():
+            lines.append(
+                f'huddle_server_avg_latency_ms{{server="{s.id}"}} {s.metrics.avg_response_ms:.2f}'
+            )
+        lines += [
+            "",
+            "# HELP huddle_server_anomaly_score Relative latency anomaly (0=normal,1=max)",
+            "# TYPE huddle_server_anomaly_score gauge",
+        ]
+        for s in self.all_servers():
+            lines.append(
+                f'huddle_server_anomaly_score{{server="{s.id}"}} {s.metrics.latency_anomaly_score:.4f}'
+            )
+        lines += [
+            "",
+            "# HELP huddle_server_rotations_total Total ring rotation count",
+            "# TYPE huddle_server_rotations_total counter",
+        ]
+        for s in self.all_servers():
+            lines.append(
+                f'huddle_server_rotations_total{{server="{s.id}"}} {s.rotation_count}'
+            )
+        lines += [
+            "",
+            "# HELP huddle_cluster_inner_count Number of active inner-ring servers",
+            "# TYPE huddle_cluster_inner_count gauge",
+            f"huddle_cluster_inner_count {len(self._inner_ring)}",
+            "",
+            "# HELP huddle_cluster_fairness_gini Inner-ring Gini fairness (0=fair)",
+            "# TYPE huddle_cluster_fairness_gini gauge",
+            f"huddle_cluster_fairness_gini {self.fairness_score():.4f}",
+            "",
+            "# HELP huddle_cluster_heat_threshold Current eviction threshold",
+            "# TYPE huddle_cluster_heat_threshold gauge",
+            f"huddle_cluster_heat_threshold {self.heat_threshold:.3f}",
+            "",
+        ]
+        if self._p95_window:
+            p95 = statistics.median(self._p95_window)
+            lines += [
+                "# HELP huddle_cluster_p95_latency_ms Cluster-wide P95 latency estimate",
+                "# TYPE huddle_cluster_p95_latency_ms gauge",
+                f"huddle_cluster_p95_latency_ms {p95:.2f}",
+                "",
+            ]
+        if self._gossip_agent:
+            peers = list(self._gossip_agent.peer_states().keys())
+            lines += [
+                "# HELP huddle_gossip_peer_count Known gossip peers",
+                "# TYPE huddle_gossip_peer_count gauge",
+                f"huddle_gossip_peer_count {len(peers)}",
+                "",
+            ]
+        return "\n".join(lines)
 
     def all_servers(self) -> list[Server]:
         """Return all servers (inner + outer)."""
@@ -825,6 +1010,208 @@ class HuddleCluster:
         )
 
 
+
+
+#  Adaptive Threshold Controller 
+
+
+class AdaptiveThresholdController:
+    """
+    v1.3.0 -- Auto-adjusts heat/cool thresholds based on cluster P95 history.
+
+    When cluster P95 is stable and low, thresholds tighten (more sensitive).
+    When P95 is high or rising (sustained load), thresholds loosen to avoid
+    over-eviction. Uses a rolling window of cluster P95 samples.
+    """
+
+    def __init__(
+        self,
+        base_heat:           float = 0.55,
+        base_cool:           float = 0.30,
+        max_delta:           float = 0.10,
+        window_size:         int   = 20,
+        adaptation_interval: float = 5.0,
+    ):
+        self.base_heat           = base_heat
+        self.base_cool           = base_cool
+        self.max_delta           = max_delta
+        self.window_size         = window_size
+        self.adaptation_interval = adaptation_interval
+
+        self._p95_window:  deque = deque(maxlen=window_size)
+        self._current_heat = base_heat
+        self._current_cool   = base_cool
+        self._last_adapted   = time.monotonic()
+        self._lock           = threading.Lock()
+
+    def record_p95(self, p95_ms: float) -> None:
+        with self._lock:
+            self._p95_window.append(p95_ms)
+
+    def maybe_adapt(self) -> tuple:
+        now = time.monotonic()
+        with self._lock:
+            if (now - self._last_adapted) < self.adaptation_interval:
+                return self._current_heat, self._current_cool
+
+            # Need at least window_size samples to establish baseline
+            if len(self._p95_window) < self.window_size:
+                return self._current_heat, self._current_cool
+
+            # Establish baseline from oldest half of window
+            window   = list(self._p95_window)
+            half     = max(1, len(window) // 2)
+            baseline = statistics.median(window[:half])
+            recent   = statistics.median(window[-max(3, half//2):])
+            ratio    = recent / max(baseline, 1.0)
+
+            if ratio > 1.5:
+                adjustment = self.max_delta           # sustained stress -- loosen
+            elif ratio < 0.7:
+                adjustment = -self.max_delta          # very healthy -- tighten
+            else:
+                t          = (ratio - 0.7) / 0.8
+                adjustment = (t * 2 - 1) * self.max_delta
+
+            new_heat = max(0.35, min(0.85, self.base_heat + adjustment))
+            new_cool = max(0.10, min(new_heat - 0.15, self.base_cool + adjustment * 0.5))
+
+            if abs(new_heat - self._current_heat) > 0.01:
+                log.info(
+                    f"Adaptive thresholds: heat {self._current_heat:.2f}->"
+                    f"{new_heat:.2f}, cool {self._current_cool:.2f}->{new_cool:.2f} "
+                    f"(P95 ratio={ratio:.2f}, baseline={baseline:.1f}ms, recent={recent:.1f}ms)"
+                )
+            self._current_heat = new_heat
+            self._current_cool = new_cool
+            self._last_adapted = now
+
+        return self._current_heat, self._current_cool
+
+    @property
+    def heat_threshold(self) -> float:
+        return self._current_heat
+
+    @property
+    def cool_threshold(self) -> float:
+        return self._current_cool
+
+
+#  Gossip Agent 
+
+
+class GossipAgent:
+    """
+    v1.3.0 -- Lightweight UDP multicast gossip for distributed temperature sharing.
+
+    Each HuddleCluster instance broadcasts its inner-ring server temperatures
+    to peer clusters. Peers use received data as advisory signals only.
+
+    Protocol: UDP multicast, JSON payload, best-effort delivery.
+
+    Usage:
+        agent  = GossipAgent(node_id="node-1")
+        cluster = create_cluster([...])
+        cluster.start(gossip_agent=agent)  # or pass gossip_agent= to HuddleCluster()
+        peers  = agent.peer_states()       # {node_id: [{id, temp, avg_ms, pos}]}
+    """
+
+    MULTICAST_GROUP   = "224.0.0.251"
+    DEFAULT_PORT      = 9999
+    MAX_MESSAGE_BYTES = 4096
+
+    def __init__(
+        self,
+        node_id:            str,
+        gossip_port:        int   = DEFAULT_PORT,
+        broadcast_interval: float = 2.0,
+        ttl:                int   = 1,
+    ):
+        self.node_id            = node_id
+        self.gossip_port        = gossip_port
+        self.broadcast_interval = broadcast_interval
+        self.ttl                = ttl
+
+        self._cluster:     Optional["HuddleCluster"] = None
+        self._peer_states: dict                       = {}
+        self._running      = False
+        self._lock         = threading.Lock()
+        self._recv_thread: Optional[threading.Thread] = None
+        self._send_thread: Optional[threading.Thread] = None
+
+    def start(self, cluster: "HuddleCluster") -> None:
+        self._cluster = cluster
+        self._running = True
+        self._recv_thread = threading.Thread(
+            target=self._recv_loop, daemon=True, name="huddle-gossip-recv"
+        )
+        self._send_thread = threading.Thread(
+            target=self._send_loop, daemon=True, name="huddle-gossip-send"
+        )
+        self._recv_thread.start()
+        self._send_thread.start()
+        log.info(f"GossipAgent started: node={self.node_id!r}, port={self.gossip_port}")
+
+    def stop(self) -> None:
+        self._running = False
+        log.info("GossipAgent stopped")
+
+    def peer_states(self) -> dict:
+        with self._lock:
+            return dict(self._peer_states)
+
+    def _build_message(self) -> bytes:
+        if self._cluster is None:
+            return b""
+        servers = [
+            {"id": s.id, "temp": round(s.temperature, 4),
+             "avg_ms": round(s.metrics.avg_response_ms, 2), "pos": s.position.value}
+            for s in self._cluster.inner_servers()
+        ]
+        return json.dumps({"node_id": self.node_id, "servers": servers}).encode()
+
+    def _send_loop(self) -> None:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, self.ttl)
+            while self._running:
+                try:
+                    data = self._build_message()
+                    if data:
+                        sock.sendto(data, (self.MULTICAST_GROUP, self.gossip_port))
+                except Exception as e:
+                    log.debug(f"Gossip send error: {e}")
+                time.sleep(self.broadcast_interval)
+        finally:
+            sock.close()
+
+    def _recv_loop(self) -> None:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.settimeout(1.0)
+            try:
+                sock.bind(("", self.gossip_port))
+                mreq = struct.pack("4sL", socket.inet_aton(self.MULTICAST_GROUP), socket.INADDR_ANY)
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+            except OSError as e:
+                log.warning(f"GossipAgent cannot join multicast (non-fatal): {e}")
+                return
+            while self._running:
+                try:
+                    data, _ = sock.recvfrom(self.MAX_MESSAGE_BYTES)
+                    msg     = json.loads(data.decode())
+                    nid     = msg.get("node_id", "")
+                    if nid and nid != self.node_id:
+                        with self._lock:
+                            self._peer_states[nid] = msg.get("servers", [])
+                except socket.timeout:
+                    pass
+                except Exception as e:
+                    log.debug(f"Gossip recv error: {e}")
+        finally:
+            sock.close()
+
 #  Quick-start helper 
 
 
@@ -847,8 +1234,10 @@ def create_cluster(
         cluster.start()
     """
     cluster = HuddleCluster(**kwargs)
-    for idx, (sid, host, port) in enumerate(server_addresses):
-        s = Server(id=sid, host=host, port=port)
+    for idx, addr in enumerate(server_addresses):
+        sid, host, port = addr[0], addr[1], addr[2]
+        weight          = float(addr[3]) if len(addr) > 3 else 1.0
+        s               = Server(id=sid, host=host, port=port, weight=weight)
         cluster.add_server(s, force_inner=(idx < cluster.max_inner_size))
     return cluster
 
@@ -859,7 +1248,7 @@ if __name__ == "__main__":
     import random
     from time import sleep
 
-    print(" HuddleCluster v1.1.0 demo — latency feedback loop")
+    print("HuddleCluster v1.3.0 demo")
 
     cluster = create_cluster([
         ("s1", "127.0.0.1", 8001),

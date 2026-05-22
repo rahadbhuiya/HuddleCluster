@@ -209,7 +209,7 @@ def draw_architecture():
     fig.tight_layout()
     fig.savefig("architecture_diagram.png", dpi=150, bbox_inches="tight",
                 facecolor="#FAFBFC")
-    print(" Saved: architecture_diagram.png")
+    print("  Saved: architecture_diagram.png")
     plt.close()
 
 
@@ -223,7 +223,7 @@ def draw_temperature_lifecycle():
                  fontsize=13, fontweight="bold", y=0.98)
     fig.patch.set_facecolor("#FAFBFC")
 
-    # ─ Left: State Machine 
+    #  Left: State Machine 
     ax = axes[0]
     ax.set_xlim(0, 10)
     ax.set_ylim(0, 8)
@@ -323,7 +323,7 @@ def draw_temperature_lifecycle():
     fig.tight_layout(rect=[0, 0.0, 1, 0.96])
     fig.savefig("temperature_lifecycle.png", dpi=150, bbox_inches="tight",
                 facecolor="#FAFBFC")
-    print(" Saved: temperature_lifecycle.png")
+    print("  Saved: temperature_lifecycle.png")
     plt.close()
 
 
@@ -453,7 +453,7 @@ def draw_flowchart():
     fig.tight_layout()
     fig.savefig("rotation_flowchart.png", dpi=150, bbox_inches="tight",
                 facecolor="#FAFBFC")
-    print("  Saved: rotation_flowchart.png")
+    print(" Saved: rotation_flowchart.png")
     plt.close()
 
 
@@ -462,11 +462,11 @@ def draw_flowchart():
 
 
 if __name__ == "__main__":
-    print(" Generating paper diagrams...")
+    print("  Generating paper diagrams...")
     draw_architecture()
     draw_temperature_lifecycle()
     draw_flowchart()
-    print("\n All diagrams saved:")
+    print("\n  All diagrams saved:")
     print("     architecture_diagram.png")
     print("     temperature_lifecycle.png")
     print("     rotation_flowchart.png")

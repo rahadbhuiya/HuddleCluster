@@ -66,6 +66,7 @@ def _cluster(min_inner=2, max_inner=5, min_outer_dwell=0.0, rotation_cooldown=0.
         max_inner_size=max_inner,
         min_outer_dwell_sec=min_outer_dwell,
         rotation_cooldown_sec=rotation_cooldown,
+        circuit_breaker_threshold=1.0,   # disabled in unit tests (error_rate tests handled separately)
     )
 
 

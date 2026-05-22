@@ -17,6 +17,21 @@ Author : Rahad Bhuiya (inspired by Penguin Biology)
 Version: 1.3.0
 License: MIT
 
+Changelog v1.3.3
+-----------------
+  NEW  Server.tags -- arbitrary key-value metadata on server objects.
+       Tags appear in health_report(), prometheus_metrics() labels,
+       and Server.__repr__(). Pass via Server(tags={...}) or as 5th
+       tuple element in create_cluster().
+  NEW  on_eviction callback -- dedicated callback fired on every eviction
+       (separate from on_rotation which fires on all rotations).
+  NEW  Throughput metrics -- requests_total counter and requests_per_second
+       gauge in health_report() and prometheus_metrics().
+  NEW  batch_record_latency() -- feed multiple (server, ms) pairs at once.
+  NEW  request_timeout_ms -- configurable dead-server timeout threshold.
+  NEW  Graceful shutdown -- drain_timeout_sec in stop().
+  NEW  Circuit breaker -- circuit_breaker_threshold parameter.
+
 Changelog v1.3.0
 -----------------
   NEW  Absolute latency floor (absolute_latency_floor_ms) -- evict servers
@@ -80,6 +95,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Generator, List, Optional
 
+#  Version 
+__version__ = "1.3.3"
+__author__  = "Rahad Bhuiya"
+__license__ = "MIT"
+
 #  Logging Setup 
 
 logging.basicConfig(
@@ -132,7 +152,15 @@ class ServerMetrics:
     )
 
     def record_latency(self, ms: float) -> None:
-        """Push one latency sample into the rolling window and refresh avg_response_ms."""
+        """
+        Push one latency sample into the rolling 10-sample window.
+
+        Refreshes avg_response_ms automatically. Called by HuddleCluster.record_latency()
+        after every request -- you generally do not call this directly.
+
+        Args:
+            ms: Observed round-trip time in milliseconds.
+        """
         self._latency_window.append(ms)
         if self._latency_window:
             self.avg_response_ms = statistics.mean(self._latency_window)
@@ -162,7 +190,12 @@ class ServerMetrics:
         self.latency_anomaly_score = max(0.0, min(1.0, (ratio - 1.0) / 2.0))
 
     def p95_latency(self) -> float:
-        """95th-percentile latency from the rolling window, or 0.0 if no data."""
+        """
+        95th-percentile latency from the rolling 10-sample window.
+
+        Returns 0.0 if the window has no samples yet.
+        Used in health_report() and prometheus_metrics() per-server entries.
+        """
         w = list(self._latency_window)
         if not w:
             return 0.0
@@ -212,18 +245,30 @@ class Server:
     # Can be overridden per-instance via HuddleCluster(ema_alpha=...)
     _EMA_ALPHA = 0.25
 
-    def __init__(self, id: str, host: str, port: int, weight: float = 1.0):
+    def __init__(
+        self,
+        id:     str,
+        host:   str,
+        port:   int,
+        weight: float = 1.0,
+        tags:   Optional[dict] = None,
+    ):
         """
         weight (v1.3.0): capacity multiplier. A server with weight=2.0 needs
         to reach 2x the base heat_threshold before eviction. Use for larger
         instances that can handle proportionally more load.
+
+        tags (v1.3.3): arbitrary key-value metadata attached to this server.
+        Tags appear in health_report() and prometheus_metrics() labels.
+        Example: tags={"region": "us-east", "tier": "primary", "az": "1a"}
         """
         if weight <= 0:
             raise ValueError("weight must be > 0")
         self.id     = id
         self.host   = host
         self.port   = port
-        self.weight = weight   # v1.3.0: capacity multiplier
+        self.weight = weight
+        self.tags   = tags or {}   # v1.3.3: arbitrary metadata
 
         self.metrics:     ServerMetrics = ServerMetrics()
         self.position:    Position      = Position.OUTER
@@ -239,13 +284,34 @@ class Server:
         self._lock = threading.Lock()
 
     def is_cold_start(self) -> bool:
-        """v1.3.0: True if server is still in cold-start protection period."""
+        """
+        True if the server is still in its cold-start protection period.
+
+        During cold start, the server stays in the outer ring regardless of
+        its temperature, preventing traffic spikes on fresh instances that
+        have not yet warmed JIT compilers or application caches.
+
+        Returns False once cold_start_sec seconds have elapsed since add_server().
+        """
         return time.monotonic() < self._cold_until
 
     def effective_heat_threshold(self, base_threshold: float) -> float:
         """
-        v1.3.0: Weighted eviction threshold.
-        weight=2.0 -> server needs temp >= base_threshold*2.0 to be evicted.
+        Compute the eviction threshold adjusted for this server's weight.
+
+        A server with weight=2.0 can handle proportionally more load before
+        eviction: effective_threshold = min(1.0, base_threshold * weight).
+
+        Examples:
+            weight=1.0, base=0.55 -> threshold=0.55 (default)
+            weight=2.0, base=0.55 -> threshold=1.10 -> clamped to 1.0 (never evicted by temp)
+            weight=0.5, base=0.55 -> threshold=0.275 (evicts sooner)
+
+        Args:
+            base_threshold: The cluster-level heat_threshold setting.
+
+        Returns:
+            Effective eviction temperature for this server, in [0, 1].
         """
         return min(1.0, base_threshold * self.weight)
 
@@ -374,8 +440,11 @@ class HuddleCluster:
         cold_start_sec:            float    = 0.0,
         adaptive_thresholds:       bool     = False,
         gossip_agent:              Optional["GossipAgent"] = None,
+        request_timeout_ms:        float    = 500.0,
+        circuit_breaker_threshold: float    = 0.5,
         metrics_updater:           Optional[Callable[[Server], None]] = None,
         on_rotation:               Optional[Callable[[RotationEvent], None]] = None,
+        on_eviction:               Optional[Callable[["Server", "EvictionReason"], None]] = None,
     ):
         #  Validation 
         if cool_threshold >= heat_threshold:
@@ -401,8 +470,11 @@ class HuddleCluster:
         self.absolute_latency_floor_ms = absolute_latency_floor_ms
         self.cold_start_sec            = cold_start_sec
         self._gossip_agent             = gossip_agent
+        self.request_timeout_ms        = request_timeout_ms
+        self.circuit_breaker_threshold = circuit_breaker_threshold
         self._metrics_updater          = metrics_updater
         self._on_rotation              = on_rotation
+        self._on_eviction              = on_eviction   # v1.3.3
 
         # Adaptive thresholds controller (v1.3.0)
         self._adaptive: Optional[AdaptiveThresholdController] = (
@@ -414,6 +486,11 @@ class HuddleCluster:
 
         # P95 tracking window for adaptive thresholds + Prometheus
         self._p95_window: deque = deque(maxlen=100)
+
+        # v1.3.3: throughput tracking
+        self._request_count: int   = 0
+        self._window_start:  float = time.monotonic()
+        self._rps_window:    deque = deque(maxlen=60)  # 60 seconds of RPS samples
 
         #  Data Structures 
         self._inner_ring: deque[Server] = deque()
@@ -448,9 +525,23 @@ class HuddleCluster:
 
     def add_server(self, server: Server, force_inner: bool = False) -> None:
         """
-        Register a new server into the cluster.
-        If force_inner=True and inner ring has space, place it there directly.
-        Otherwise it starts in the outer ring.
+        Register a server in the cluster.
+
+        If cold_start_sec > 0, the server always starts in the outer ring
+        regardless of force_inner, with a cold_start timer preventing
+        early promotion.
+
+        Args:
+            server:      Server instance to register (see Server class).
+            force_inner: If True and inner ring has space, place in inner ring
+                         directly. Ignored when cold_start_sec > 0.
+
+        Example:
+            cluster.add_server(
+                Server(id="s4", host="10.0.0.4", port=8080,
+                       weight=2.0, tags={"region": "eu-west"}),
+                force_inner=True,
+            )
         """
         server._EMA_ALPHA = self.ema_alpha
         with self._lock:
@@ -476,7 +567,15 @@ class HuddleCluster:
     def remove_server(self, server_id: str) -> bool:
         """
         Gracefully remove a server from the cluster.
-        If removed from inner, attempt to pull from outer to maintain size.
+
+        If removed from the inner ring, attempts to pull from the outer ring
+        to maintain min_inner_size. Logs a warning if server_id is not found.
+
+        Args:
+            server_id: The id string of the server to remove.
+
+        Returns:
+            True if the server was found and removed, False otherwise.
         """
         with self._lock:
             for s in list(self._inner_ring):
@@ -497,7 +596,18 @@ class HuddleCluster:
         return False
 
     def force_evict(self, server_id: str) -> bool:
-        """Manually evict a server from inner ring to outer ring."""
+        """
+        Manually evict a server from the inner ring to the outer ring.
+
+        Useful for operator-triggered maintenance or draining a specific server
+        before a deployment. The on_eviction callback fires with reason=MANUAL.
+
+        Args:
+            server_id: The id string of the server to evict.
+
+        Returns:
+            True if the server was found in the inner ring and evicted.
+        """
         with self._lock:
             for s in list(self._inner_ring):
                 if s.id == server_id:
@@ -555,6 +665,40 @@ class HuddleCluster:
         with self._lock:
             inner_snap = list(self._inner_ring)
         p95_vals = [s.metrics.p95_latency() for s in inner_snap if s.metrics.p95_latency() > 0]
+        if p95_vals:
+            cluster_p95 = statistics.mean(p95_vals)
+            self._p95_window.append(cluster_p95)
+            if self._adaptive:
+                self._adaptive.record_p95(cluster_p95)
+
+    def batch_record_latency(self, measurements: list) -> None:
+        """
+        v1.3.3 -- Feed multiple latency samples in one call.
+
+        measurements: list of (server, latency_ms) tuples.
+
+        Example:
+            cluster.batch_record_latency([
+                (s1, 15.2),
+                (s2, 18.7),
+                (s3, 220.0),   # slow server
+            ])
+        """
+        for server, latency_ms in measurements:
+            server.metrics.record_latency(latency_ms)
+
+        # Compute cluster baseline once for all servers (efficient)
+        with self._lock:
+            inner = list(self._inner_ring)
+        avgs = [s.metrics.avg_response_ms for s in inner if s.metrics.avg_response_ms > 0]
+        cluster_baseline = statistics.median(avgs) if avgs else 1.0
+
+        for server, _ in measurements:
+            server.metrics.update_latency_anomaly(cluster_baseline)
+            server.update_temperature()
+
+        # Feed P95 window
+        p95_vals = [s.metrics.p95_latency() for s in inner if s.metrics.p95_latency() > 0]
         if p95_vals:
             cluster_p95 = statistics.mean(p95_vals)
             self._p95_window.append(cluster_p95)
@@ -622,7 +766,22 @@ class HuddleCluster:
 
     def rotate(self) -> bool:
         """
-        One full rotation cycle — the penguin huddle step.
+        Run one full rotation cycle (the penguin huddle step).
+
+        Normally called automatically by the background daemon every
+        rotation_interval_sec. Can be called manually for testing or
+        custom scheduling.
+
+        Steps:
+            1. Evict overheated or floor-breaching inner servers to outer ring
+               (capped at max(1, |I|/3) per cycle -- thundering herd prevention).
+            2. Promote coolest eligible outer server to inner ring
+               (gated by min_outer_dwell_sec -- flapping prevention).
+            3. Evict unhealthy or circuit-breaker-tripped inner servers.
+
+        Returns:
+            True if any server changed rings during this cycle.
+        
 
         Step 1: Evict overheated inner servers → outer ring
         Step 2: Pull cooled outer servers → inner ring
@@ -693,12 +852,21 @@ class HuddleCluster:
                 else:
                     break
 
-            # Step 3: Health check evictions
+            # Step 3: Health evictions + circuit breaker (v1.3.3)
+            # Note: health/circuit evictions also respect min_inner_size guard
+            # but are NOT subject to the thundering herd cap (intentional --
+            # unhealthy servers should be removed promptly).
             for server in list(self._inner_ring):
-                if not server.metrics.is_healthy:
-                    if len(self._inner_ring) > self.min_inner_size:
-                        self._move_to_outer(server, EvictionReason.HEALTH_FAIL)
-                        rotated = True
+                if len(self._inner_ring) <= self.min_inner_size:
+                    break
+                unhealthy    = not server.metrics.is_healthy
+                circuit_open = (
+                    self.circuit_breaker_threshold < 1.0
+                    and server.metrics.error_rate >= self.circuit_breaker_threshold
+                )
+                if unhealthy or circuit_open:
+                    self._move_to_outer(server, EvictionReason.HEALTH_FAIL)
+                    rotated = True
 
             return rotated
 
@@ -732,8 +900,15 @@ class HuddleCluster:
         if self._on_rotation:
             self._on_rotation(event)
 
+        # v1.3.3: dedicated eviction callback
+        if self._on_eviction:
+            try:
+                self._on_eviction(server, reason)
+            except Exception as exc:
+                log.warning(f"on_eviction callback error: {exc}")
+
         log.info(
-            f" {server.id!r} inner→outer  "
+            f" {server.id!r} inner->outer  "
             f"reason={reason.value}  temp={server.temperature:.3f}  "
             f"evictions={server._consecutive_evictions}"
         )
@@ -794,16 +969,35 @@ class HuddleCluster:
             self._gossip_agent.start(self)
         log.info(f"HuddleCluster started (interval={rotation_interval_sec}s)")
 
-    def stop(self, timeout: float = 5.0) -> None:
-        """Gracefully stop the rotation daemon."""
+    def stop(self, timeout: float = 5.0, drain_timeout_sec: float = 0.0) -> None:
+        """
+        Gracefully stop the rotation daemon.
+
+        drain_timeout_sec (v1.3.3): if > 0, wait for in-flight requests to
+        complete before stopping. Monitors active_connections across all
+        inner-ring servers; stops waiting when all reach 0 or timeout elapses.
+        """
+        if drain_timeout_sec > 0:
+            log.info(f"Draining connections (timeout={drain_timeout_sec}s)...")
+            deadline = time.monotonic() + drain_timeout_sec
+            while time.monotonic() < deadline:
+                with self._lock:
+                    total_active = sum(
+                        s.metrics.active_connections for s in self._inner_ring
+                    )
+                if total_active == 0:
+                    log.info("All connections drained.")
+                    break
+                time.sleep(0.05)
+            else:
+                log.warning("Drain timeout elapsed; stopping with active connections.")
+
         self._running = False
         if self._rotation_thread and self._rotation_thread.is_alive():
             self._rotation_thread.join(timeout=timeout)
         if self._gossip_agent:
             self._gossip_agent.stop()
         log.info("HuddleCluster stopped")
-
-        
 
     def _rotation_loop(self, interval: float) -> None:
         while self._running:
@@ -831,17 +1025,20 @@ class HuddleCluster:
 
     def fairness_score(self) -> float:
         """
-        Gini-inspired fairness score — measures how evenly inner-ring
-        servers share active duty time among themselves.
+        Gini coefficient measuring inner-ring server dwell-time fairness.
 
-          0.0 = perfectly fair (all inner servers get equal time)
-          1.0 = completely unfair
+        Computes the Gini coefficient over total_inner_time of all currently
+        active inner-ring servers. Outer-ring servers are excluded -- they are
+        intentionally resting, not unfairly skipped.
 
-        v1.2.0: Only inner-ring servers are compared. Outer-ring servers
-        are intentionally resting — including them in fairness math would
-        always produce a misleadingly bad score.
+        Interpretation:
+            0.00 -- perfectly fair (all inner servers share duty equally)
+            0.30 -- alert threshold for production monitoring
+            1.00 -- completely unfair (one server bears all load)
 
-        Alert if this exceeds 0.3 in production.
+        Returns:
+            Gini coefficient in [0, 1]. Returns 0.0 for clusters with
+            fewer than 2 inner-ring servers.
         """
         servers = self.inner_servers()   # v1.2.0: inner only
         if len(servers) < 2:
@@ -873,6 +1070,7 @@ class HuddleCluster:
                 {
                     "id":             s.id,
                     "weight":         s.weight,
+                    "tags":           s.tags,
                     "temp":           round(s.temperature, 4),
                     "rotations":      s.rotation_count,
                     "inner_time_sec": round(s.total_inner_time, 2),
@@ -886,6 +1084,7 @@ class HuddleCluster:
                 {
                     "id":             s.id,
                     "weight":         s.weight,
+                    "tags":           s.tags,
                     "temp":           round(s.temperature, 4),
                     "outer_time_sec": round(s.total_outer_time, 2),
                     "avg_latency_ms": round(s.metrics.avg_response_ms, 2),
@@ -900,6 +1099,8 @@ class HuddleCluster:
             "max_inner_temp":   round(max(inner_temps), 4) if inner_temps else 0,
             "fairness_score":   round(self.fairness_score(), 4),
             "total_rotations":  sum(s.rotation_count for s in inner + outer),
+            "requests_per_sec": round(statistics.mean(self._rps_window), 2) if self._rps_window else 0.0,
+            "requests_total":   sum(self._rps_window) if self._rps_window else 0,
             "recent_rotations": [
                 {
                     "server_id":   e.server_id,
@@ -926,8 +1127,9 @@ class HuddleCluster:
             "# TYPE huddle_server_temperature gauge",
         ]
         for s in self.all_servers():
+            tag_labels = "".join(f',{k}="{v}"' for k, v in s.tags.items())
             lines.append(
-                f'huddle_server_temperature{{server="{s.id}",ring="{s.position.value}"}} '
+                f'huddle_server_temperature{{server="{s.id}",ring="{s.position.value}"{tag_labels}}} '
                 f"{s.temperature:.4f}"
             )
         lines += [
@@ -988,18 +1190,29 @@ class HuddleCluster:
                 f"huddle_gossip_peer_count {len(peers)}",
                 "",
             ]
+
+        # v1.3.3: throughput
+        rps = statistics.mean(self._rps_window) if self._rps_window else 0.0
+        lines += [
+            "# HELP huddle_cluster_requests_per_second Routing throughput",
+            "# TYPE huddle_cluster_requests_per_second gauge",
+            f"huddle_cluster_requests_per_second {rps:.2f}",
+            "",
+        ]
         return "\n".join(lines)
 
     def all_servers(self) -> list[Server]:
-        """Return all servers (inner + outer)."""
+        """Return all registered servers (inner ring + outer ring). Thread-safe."""
         with self._lock:
             return list(self._inner_ring) + list(self._outer_ring)
 
     def inner_servers(self) -> list[Server]:
+        """Return active inner-ring servers in current round-robin order. Thread-safe."""
         with self._lock:
             return list(self._inner_ring)
 
     def outer_servers(self) -> list[Server]:
+        """Return resting outer-ring servers sorted by temperature (coolest first). Thread-safe."""
         with self._lock:
             return list(self._outer_ring)
 
@@ -1236,10 +1449,13 @@ def create_cluster(
         cluster.start()
     """
     cluster = HuddleCluster(**kwargs)
-    for idx, addr in enumerate(server_addresses):
-        sid, host, port = addr[0], addr[1], addr[2]
-        weight          = float(addr[3]) if len(addr) > 3 else 1.0
-        s               = Server(id=sid, host=host, port=port, weight=weight)
+    for idx, addr in enumerate(server_addresses):  # noqa: E501
+        sid    = addr[0]
+        host   = addr[1]
+        port   = addr[2]
+        weight = float(addr[3]) if len(addr) > 3 else 1.0
+        tags   = addr[4] if len(addr) > 4 else {}
+        s      = Server(id=sid, host=host, port=port, weight=weight, tags=tags)
         cluster.add_server(s, force_inner=(idx < cluster.max_inner_size))
     return cluster
 

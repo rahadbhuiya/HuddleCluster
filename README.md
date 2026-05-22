@@ -3,16 +3,11 @@
 A penguin-inspired, self-organizing server load balancer with adaptive thermal eviction.
 
 **Author:** Rahad Bhuiya
-**Version:** 1.3.2
+**Version:** 1.3.3
 **License:** MIT
-**Paper:** [HuddleCluster: A Penguin-Inspired Self-Organizing Load Balancer with Adaptive Thermal Eviction](https://github.com/rahadbhuiya/HuddleCluster/blob/main/docs/HuddleCluster.pdf)
+**Paper:** [HuddleCluster: A Penguin-Inspired Self-Organizing Load Balancer with Adaptive Thermal Eviction](https://github.com/rahadbhuiya/HuddleCluster/blob/main/docs/HuddleCluster_Paper.pdf)
 
 ---
-
-[![PyPI version](https://badge.fury.io/py/huddle-cluster.svg)](https://pypi.org/project/huddle-cluster/)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Downloads](https://img.shields.io/pypi/dm/huddle-cluster.svg)](https://pypi.org/project/huddle-cluster/)
 
 ## The Idea
 
@@ -112,8 +107,6 @@ docker compose down
 ## Quick Start
 
 ```bash
-pip install huddle-cluste
-or
 pip install -e .
 # with benchmark dependencies:
 pip install -e ".[benchmark]"
@@ -403,6 +396,32 @@ docker compose up -d
 python benchmark_industry.py
 docker compose down
 ```
+
+---
+
+## GitHub Actions
+
+Three workflows are included:
+
+**CI** (`ci.yml`) — runs on every push and pull request:
+- Unit tests on Python 3.10, 3.11, 3.12
+- Integration tests (FastAPI upstream servers)
+- Type stub syntax check
+- Package build verification
+
+**Publish** (`publish.yml`) — triggers on version tags (`v*.*.*`):
+- Runs full test suite
+- Builds wheel and sdist
+- Publishes to PyPI via Trusted Publishing (no API token needed)
+- Creates GitHub Release with changelog entry
+
+**Benchmark** (`benchmark.yml`) — manual trigger only:
+- Runs statistical benchmark with configurable trials
+- Uploads chart artifacts
+
+Setup PyPI Trusted Publishing:
+1. PyPI -> Your project -> Publishing -> Add publisher
+2. GitHub owner: `rahadbhuiya`, repo: `HuddleCluster`, workflow: `publish.yml`
 
 ---
 

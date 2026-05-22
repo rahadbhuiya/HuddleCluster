@@ -500,7 +500,7 @@ def plot_overhead(overhead, memory):
 
 if __name__ == "__main__":
     print("=" * 60)
-    print(f"   HuddleCluster Statistical Benchmark")
+    print(f"    HuddleCluster Statistical Benchmark")
     print(f"  {N_TRIALS} trials × 3 scenarios")
     print(f"  This will take ~{N_TRIALS * 3} minutes")
     print("=" * 60)
@@ -530,7 +530,7 @@ if __name__ == "__main__":
     all_results["Normal Load"] = sc1
 
     #  Scenario 2: Slow Server 
-    print("\n  Scenario 2/3: Slow Server")
+    print("\n Scenario 2/3: Slow Server")
     rr_t, lc_t, hc_t = run_trials(scenario_slow_small, N_TRIALS, "Slow Server")
 
     sc2 = {}
@@ -563,12 +563,12 @@ if __name__ == "__main__":
     }
     all_results["Server Failure"] = sc3
 
-    #  Save JSON 
+    #  Save JSON
     output = {"n_trials": N_TRIALS, "n_requests": N_REQUESTS,
               "alpha": ALPHA, "scenarios": all_results}
     with open("statistical_results.json", "w") as f:
         json.dump(output, f, indent=2)
-    print("\n Saved: statistical_results.json")
+    print("\n  Saved: statistical_results.json")
 
     #  Print Summary 
     print("\n" + "=" * 72)

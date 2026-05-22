@@ -105,7 +105,7 @@ def inject_slow(server_id):
     port = next(s["port"] for s in SERVERS if s["id"] == server_id)
     try:
         httpx.post(f"{BASE_URL}:{port}/admin/slow", timeout=2.0)
-        print(f"  ⚡ {server_id} is now SLOW (5x latency)")
+        print(f"   {server_id} is now SLOW (5x latency)")
     except Exception as e:
         print(f"  Warning: could not slow {server_id}: {e}")
 
@@ -115,7 +115,7 @@ def inject_kill(server_id):
     port = next(s["port"] for s in SERVERS if s["id"] == server_id)
     try:
         httpx.post(f"{BASE_URL}:{port}/admin/kill", timeout=2.0)
-        print(f"  ⚡ {server_id} is now DEAD")
+        print(f"   {server_id} is now DEAD")
     except Exception as e:
         print(f"  Warning: could not kill {server_id}: {e}")
 
@@ -171,6 +171,7 @@ class LeastConnections:
 
 
 # HTTP Request Runner
+
 
 def send_http_request(balancer, latencies, lock, hc_cluster=None):
     """Send one real HTTP GET to the selected upstream server."""
@@ -296,7 +297,7 @@ def scenario_slow_server():
 
 
 def scenario_server_failure():
-    print("\n SCENARIO 3: Server Failure (real HTTP, s1 crashes at halfway)")
+    print("\n  SCENARIO 3: Server Failure (real HTTP, s1 crashes at halfway)")
     reset_all_servers()
 
     rr_r = run_http_benchmark(RoundRobin(SERVERS),
@@ -403,7 +404,7 @@ if __name__ == "__main__":
         import uvicorn
 
     print("=" * 60)
-    print("   HuddleCluster Real HTTP Benchmark")
+    print("    HuddleCluster Real HTTP Benchmark")
     print("  6 FastAPI servers · 3 scenarios · ~10 minutes")
     print("=" * 60)
 
