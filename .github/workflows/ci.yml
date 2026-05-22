@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install core (no dependencies)
+        run: pip install -e .
+
+      - name: Run unit tests
+        run: python -m unittest tests/test_rotation.py tests/test_fairness.py -v
+
+      - name: Run stress tests
+        run: python -m unittest tests/test_stress.py -v
+
+      - name: Install integration test dependencies
+        run: pip install ".[fastapi]" httpx
+
+      - name: Run integration tests
+        run: python -m unittest tests/test_integration.py -v
+
+      - name: Check type stubs syntax
+        run: python -c "
+import ast
+with open('huddle_cluster.pyi') as f:
+    src = f.read()
+ast.parse(src)
+print('Type stubs syntax OK')
+"
+
+      - name: Verify import and version
+        run: python -c "
+import huddle_cluster
+print('Version:', huddle_cluster.__version__)
+from huddle_cluster import (
+    create_cluster, HuddleCluster, Server, ServerMetrics,
+    AdaptiveThresholdController, GossipAgent, RotationEvent,
+    Position, EvictionReason,
+)
+print('All public exports OK')
+"
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install linting tools
+        run: pip install pyflakes
+
+      - name: Check for unused imports and undefined names
+        run: python -m pyflakes huddle_cluster.py
+
+  build:
+    name: Build package
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build wheel and sdist
+        run: python -m build
+
+      - name: Check dist contents
+        run: |
+          ls -lh dist/
+          python -c "
+import zipfile, tarfile, os
+
+# Check wheel
+whl = [f for f in os.listdir('dist') if f.endswith('.whl')][0]
+with zipfile.ZipFile(f'dist/{whl}') as z:
+    names = z.namelist()
+    assert any('huddle_cluster.py' in n for n in names), 'huddle_cluster.py missing from wheel'
+    assert any('METADATA' in n for n in names), 'METADATA missing from wheel'
+    print(f'Wheel OK: {whl}')
+
+# Check sdist
+tgz = [f for f in os.listdir('dist') if f.endswith('.tar.gz')][0]
+with tarfile.open(f'dist/{tgz}') as t:
+    names = t.getnames()
+    assert any('huddle_cluster.py' in n for n in names), 'huddle_cluster.py missing from sdist'
+    print(f'Sdist OK: {tgz}')
+"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

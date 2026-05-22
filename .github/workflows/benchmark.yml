@@ -1,0 +1,55 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      n_trials:
+        description: "Number of statistical trials (default 10)"
+        required: false
+        default: "10"
+      scenario:
+        description: "Scenario: all | normal | slow | failure"
+        required: false
+        default: "all"
+
+jobs:
+  benchmark:
+    name: Statistical Benchmark
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e . matplotlib numpy scipy
+
+      - name: Run statistical benchmark
+        env:
+          N_TRIALS: ${{ inputs.n_trials }}
+        run: |
+          cd benchmarks
+          python -c "
+import benchmark_statistical as bs
+bs.N_TRIALS = int('$N_TRIALS')
+print(f'Running {bs.N_TRIALS} trials...')
+r1 = bs.scenario_normal_small()
+r2 = bs.scenario_slow_small()
+r3 = bs.scenario_failure_small()
+bs.print_summary(
+    {'Normal Load': r1, 'Slow Server (5x)': r2, 'Server Failure': r3},
+    ['Normal Load','Slow Server (5x)','Server Failure']
+)
+"
+
+      - name: Upload benchmark charts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results
+          path: benchmarks/*.png
+          if-no-files-found: ignore
