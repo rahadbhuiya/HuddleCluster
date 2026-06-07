@@ -1,0 +1,90 @@
+<svg width="100%" viewBox="0 0 680 320" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>HuddleCluster logo</title>
+<desc>A circular dual-ring logo with stylized penguin silhouettes forming an inner and outer ring, with the text HuddleCluster below</desc>
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </marker>
+  <style>
+    .ring-outer { fill: none; stroke: #3B82F6; stroke-width: 1.5; stroke-dasharray: 6 4; opacity: 0.5; }
+    .ring-inner { fill: none; stroke: #3B82F6; stroke-width: 2; opacity: 0.8; }
+    .penguin-inner { fill: #1D4ED8; }
+    .penguin-outer { fill: #93C5FD; }
+    .penguin-belly  { fill: #EFF6FF; }
+    .heat-arc { fill: none; stroke: #EF4444; stroke-width: 2.5; stroke-linecap: round; opacity: 0.7; }
+    .cool-arc { fill: none; stroke: #10B981; stroke-width: 2.5; stroke-linecap: round; opacity: 0.7; }
+    .center-dot { fill: #3B82F6; opacity: 0.15; }
+    .logo-text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-weight: 500; fill: #111827; }
+    .logo-sub  { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-weight: 400; fill: #6B7280; }
+  </style>
+</defs>
+
+<g transform="translate(160, 155)">
+  <circle cx="0" cy="0" r="90" class="center-dot"/>
+  <circle cx="0" cy="0" r="118" class="ring-outer"/>
+  <circle cx="0" cy="0" r="72" class="ring-inner"/>
+
+  <path d="M 50 -52 A 72 72 0 0 1 68 -24" class="heat-arc" marker-end="url(#arrow)"/>
+  <path d="M -40 112 A 118 118 0 0 1 40 112" class="cool-arc" marker-end="url(#arrow)"/>
+
+  <g transform="rotate(0) translate(0,-72)">
+    <ellipse cx="0" cy="0" rx="10" ry="14" class="penguin-inner"/>
+    <ellipse cx="0" cy="2" rx="6" ry="9" class="penguin-belly"/>
+    <circle cx="0" cy="-11" r="5.5" class="penguin-inner"/>
+    <ellipse cx="-3" cy="-11" rx="1.5" ry="2" class="penguin-belly"/>
+  </g>
+  <g transform="rotate(90) translate(0,-72)">
+    <ellipse cx="0" cy="0" rx="10" ry="14" class="penguin-inner"/>
+    <ellipse cx="0" cy="2" rx="6" ry="9" class="penguin-belly"/>
+    <circle cx="0" cy="-11" r="5.5" class="penguin-inner"/>
+    <ellipse cx="-3" cy="-11" rx="1.5" ry="2" class="penguin-belly"/>
+  </g>
+  <g transform="rotate(180) translate(0,-72)">
+    <ellipse cx="0" cy="0" rx="10" ry="14" class="penguin-inner"/>
+    <ellipse cx="0" cy="2" rx="6" ry="9" class="penguin-belly"/>
+    <circle cx="0" cy="-11" r="5.5" class="penguin-inner"/>
+    <ellipse cx="-3" cy="-11" rx="1.5" ry="2" class="penguin-belly"/>
+  </g>
+  <g transform="rotate(270) translate(0,-72)">
+    <ellipse cx="0" cy="0" rx="10" ry="14" class="penguin-inner"/>
+    <ellipse cx="0" cy="2" rx="6" ry="9" class="penguin-belly"/>
+    <circle cx="0" cy="-11" r="5.5" class="penguin-inner"/>
+    <ellipse cx="-3" cy="-11" rx="1.5" ry="2" class="penguin-belly"/>
+  </g>
+
+  <g transform="rotate(30) translate(0,-118)">
+    <ellipse cx="0" cy="0" rx="7" ry="10" class="penguin-outer"/>
+    <ellipse cx="0" cy="2" rx="4" ry="6" class="penguin-belly"/>
+    <circle cx="0" cy="-8" r="4" class="penguin-outer"/>
+  </g>
+  <g transform="rotate(90) translate(0,-118)">
+    <ellipse cx="0" cy="0" rx="7" ry="10" class="penguin-outer"/>
+    <ellipse cx="0" cy="2" rx="4" ry="6" class="penguin-belly"/>
+    <circle cx="0" cy="-8" r="4" class="penguin-outer"/>
+  </g>
+  <g transform="rotate(150) translate(0,-118)">
+    <ellipse cx="0" cy="0" rx="7" ry="10" class="penguin-outer"/>
+    <ellipse cx="0" cy="2" rx="4" ry="6" class="penguin-belly"/>
+    <circle cx="0" cy="-8" r="4" class="penguin-outer"/>
+  </g>
+  <g transform="rotate(210) translate(0,-118)">
+    <ellipse cx="0" cy="0" rx="7" ry="10" class="penguin-outer"/>
+    <ellipse cx="0" cy="2" rx="4" ry="6" class="penguin-belly"/>
+    <circle cx="0" cy="-8" r="4" class="penguin-outer"/>
+  </g>
+  <g transform="rotate(270) translate(0,-118)">
+    <ellipse cx="0" cy="0" rx="7" ry="10" class="penguin-outer"/>
+    <ellipse cx="0" cy="2" rx="4" ry="6" class="penguin-belly"/>
+    <circle cx="0" cy="-8" r="4" class="penguin-outer"/>
+  </g>
+  <g transform="rotate(330) translate(0,-118)">
+    <ellipse cx="0" cy="0" rx="7" ry="10" class="penguin-outer"/>
+    <ellipse cx="0" cy="2" rx="4" ry="6" class="penguin-belly"/>
+    <circle cx="0" cy="-8" r="4" class="penguin-outer"/>
+  </g>
+</g>
+
+<text x="340" y="232" text-anchor="middle" font-size="32" class="logo-text">HuddleCluster</text>
+<text x="340" y="258" text-anchor="middle" font-size="13" class="logo-sub">self-organizing load balancer</text>
+
+</svg>

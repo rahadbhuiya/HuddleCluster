@@ -6,6 +6,7 @@
 
 
 # FastAPI Integration (examples/fastapi_example.py)
+# pip install "huddle-cluster[fastapi]"
 
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
@@ -13,12 +14,41 @@ httpx>=0.27.0
 pydantic>=2.7.0
 
 
-# Terminal Simulation (examples/simulation.py) — optional
+# Redis Backend (huddle_cluster_pkg/backends_redis.py)
+# pip install "huddle-cluster[redis]"
+
+redis>=5.0.0
+
+
+# gRPC Support (huddle_cluster_pkg/grpc_cluster.py)
+# pip install "huddle-cluster[grpc]"
+
+grpcio>=1.62.0
+
+
+# Kubernetes Discovery (huddle_cluster_pkg/discovery_k8s.py)
+# pip install "huddle-cluster[kubernetes]"
+
+kubernetes>=29.0.0
+
+
+# Terminal Simulation (examples/simulation.py)
+# pip install "huddle-cluster[simulation]"
 
 rich>=13.7.0
 
 
+# Benchmarks (benchmarks/)
+# pip install "huddle-cluster[benchmark]"
+
+matplotlib>=3.8
+numpy>=1.26
+scipy>=1.13
+
+
 # Testing
+# pip install "huddle-cluster[dev]"
 
 pytest>=8.2.0
 pytest-timeout>=2.3.0       # guards against deadlock in stress tests
+fakeredis>=2.21.0            # in-memory Redis mock for test_redis_backend.py

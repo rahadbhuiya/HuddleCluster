@@ -1,6 +1,6 @@
 """
-HuddleCluster — Penguin-inspired Self-Organizing Server Load Balancer
-=====================================================================
+HuddleCluster - Penguin-inspired Self-Organizing Server Load Balancer
+
 A load-balancing algorithm inspired by Emperor Penguin huddle behaviour.
 
 Quick start:
@@ -21,24 +21,42 @@ Quick start:
 GitHub: https://github.com/rahadbhuiya/HuddleCluster
 """
 
-from .huddle_cluster import (
-    # Version
-    __version__,
-    __author__,
-    __license__,
-    # Main classes
-    HuddleCluster,
-    Server,
-    ServerMetrics,
-    RotationEvent,
-    Position,
-    EvictionReason,
-    # v1.3.0
-    AdaptiveThresholdController,
-    GossipAgent,
-    # Factory
-    create_cluster,
-)
+try:
+    from .huddle_cluster import (
+        __version__,
+        __author__,
+        __license__,
+        HuddleCluster,
+        Server,
+        ServerMetrics,
+        RotationEvent,
+        AlertEvent,
+        TrafficRamp,
+        Position,
+        EvictionReason,
+        RetryExhaustedError,
+        AdaptiveThresholdController,
+        GossipAgent,
+        create_cluster,
+    )
+except ImportError:
+    from huddle_cluster import (
+        __version__,
+        __author__,
+        __license__,
+        HuddleCluster,
+        Server,
+        ServerMetrics,
+        RotationEvent,
+        AlertEvent,
+        TrafficRamp,
+        Position,
+        EvictionReason,
+        RetryExhaustedError,
+        AdaptiveThresholdController,
+        GossipAgent,
+        create_cluster,
+    )
 
 __all__ = [
     "__version__",
@@ -46,8 +64,11 @@ __all__ = [
     "Server",
     "ServerMetrics",
     "RotationEvent",
+    "AlertEvent",
+    "TrafficRamp",
     "Position",
     "EvictionReason",
+    "RetryExhaustedError",
     "AdaptiveThresholdController",
     "GossipAgent",
     "create_cluster",

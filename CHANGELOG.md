@@ -5,6 +5,41 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.4.0] - 2026-06-07
+
+### Added
+- Persistent state -- `state_file` and `checkpoint_interval_sec` parameters save cluster
+  temperature state to JSON and restore it on restart, preventing cold-start degradation
+  after rolling restarts
+- Webhook alerting -- `alert_webhooks`, `alert_on`, `alert_headers`, `alert_timeout_sec`
+  parameters; POSTs JSON payloads to any HTTP endpoint on eviction, promotion, or
+  health-state change events
+- Built-in HTTP health checker -- `health_check_path`, `health_check_interval_sec`,
+  `health_check_timeout_sec`, `health_check_failures`; probes upstream servers directly
+  and evicts without needing an external health check loop
+- WebSocket connection draining -- `ws_drain_timeout_sec`, `ws_connection()`,
+  `ws_open()`, `ws_close()`; gracefully waits for active WebSocket connections to finish
+  before evicting a server
+- `huddle_cluster_pkg` extension package:
+  - `backends_redis.py` -- Redis shared-state backend for multi-node deployments
+  - `grpc_cluster.py` -- Thermal-aware gRPC channel routing
+  - `discovery_k8s.py` -- Kubernetes pod auto-discovery via Watch API
+- Optional dependency extras: `redis`, `grpc`, `kubernetes`, `simulation`
+- 14 new test modules (427 tests total): `test_admin_api`, `test_alerting`,
+  `test_canary`, `test_dashboard`, `test_draining`, `test_grpc_cluster`,
+  `test_health_checker`, `test_histogram`, `test_k8s_discovery`,
+  `test_persistent_state`, `test_redis_backend`, `test_retry`,
+  `test_sticky_sessions`, and updates to existing suites
+
+### Fixed
+- `ConnectionAbortedError` (Windows WinError 10053) now caught in the dashboard
+  SSE stream (`/dashboard/stream`) and admin HTTP handler; Windows clients that
+  close the connection no longer print tracebacks to the console
+- `huddle_cluster_pkg` was missing `__init__.py`; package is now properly importable
+  after `pip install`
+
+---
+
 ## [1.3.3] - 2026-05-16
 
 ### Added

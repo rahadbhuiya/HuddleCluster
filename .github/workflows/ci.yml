@@ -26,40 +26,54 @@ jobs:
           cache: pip
 
       - name: Install core (no dependencies)
-        run: pip install -e .
+        run: pip install -e . pytest pytest-timeout
 
-      - name: Run unit tests
-        run: python -m unittest tests/test_rotation.py tests/test_fairness.py -v
-
-      - name: Run stress tests
-        run: python -m unittest tests/test_stress.py -v
+      - name: Run core tests
+        run: |
+          pytest tests/test_rotation.py tests/test_fairness.py \
+                 tests/test_stress.py tests/test_histogram.py -v
 
       - name: Install integration test dependencies
         run: pip install ".[fastapi]" httpx
 
       - name: Run integration tests
-        run: python -m unittest tests/test_integration.py -v
+        run: |
+          pytest tests/test_integration.py tests/test_admin_api.py \
+                 tests/test_dashboard.py tests/test_alerting.py \
+                 tests/test_canary.py tests/test_draining.py \
+                 tests/test_health_checker.py tests/test_persistent_state.py \
+                 tests/test_retry.py tests/test_sticky_sessions.py -v
+
+      - name: Install extension test dependencies
+        run: pip install ".[redis]" fakeredis
+
+      - name: Run extension tests (redis, grpc, k8s -- all use mocks)
+        run: |
+          pytest tests/test_redis_backend.py tests/test_grpc_cluster.py \
+                 tests/test_k8s_discovery.py -v
 
       - name: Check type stubs syntax
-        run: python -c "
-import ast
-with open('huddle_cluster.pyi') as f:
-    src = f.read()
-ast.parse(src)
-print('Type stubs syntax OK')
-"
+        run: |
+          python -c "
+          import ast
+          with open('huddle_cluster.pyi') as f:
+              src = f.read()
+          ast.parse(src)
+          print('Type stubs syntax OK')
+          "
 
       - name: Verify import and version
-        run: python -c "
-import huddle_cluster
-print('Version:', huddle_cluster.__version__)
-from huddle_cluster import (
-    create_cluster, HuddleCluster, Server, ServerMetrics,
-    AdaptiveThresholdController, GossipAgent, RotationEvent,
-    Position, EvictionReason,
-)
-print('All public exports OK')
-"
+        run: |
+          python -c "
+          import huddle_cluster
+          print('Version:', huddle_cluster.__version__)
+          from huddle_cluster import (
+              create_cluster, HuddleCluster, Server, ServerMetrics,
+              AdaptiveThresholdController, GossipAgent, RotationEvent,
+              Position, EvictionReason,
+          )
+          print('All public exports OK')
+          "
 
   lint:
     name: Lint
@@ -97,23 +111,21 @@ print('All public exports OK')
         run: |
           ls -lh dist/
           python -c "
-import zipfile, tarfile, os
+          import zipfile, tarfile, os
 
-# Check wheel
-whl = [f for f in os.listdir('dist') if f.endswith('.whl')][0]
-with zipfile.ZipFile(f'dist/{whl}') as z:
-    names = z.namelist()
-    assert any('huddle_cluster.py' in n for n in names), 'huddle_cluster.py missing from wheel'
-    assert any('METADATA' in n for n in names), 'METADATA missing from wheel'
-    print(f'Wheel OK: {whl}')
+          whl = [f for f in os.listdir('dist') if f.endswith('.whl')][0]
+          with zipfile.ZipFile(f'dist/{whl}') as z:
+              names = z.namelist()
+              assert any('huddle_cluster.py' in n for n in names), 'huddle_cluster.py missing from wheel'
+              assert any('METADATA' in n for n in names), 'METADATA missing from wheel'
+              print(f'Wheel OK: {whl}')
 
-# Check sdist
-tgz = [f for f in os.listdir('dist') if f.endswith('.tar.gz')][0]
-with tarfile.open(f'dist/{tgz}') as t:
-    names = t.getnames()
-    assert any('huddle_cluster.py' in n for n in names), 'huddle_cluster.py missing from sdist'
-    print(f'Sdist OK: {tgz}')
-"
+          tgz = [f for f in os.listdir('dist') if f.endswith('.tar.gz')][0]
+          with tarfile.open(f'dist/{tgz}') as t:
+              names = t.getnames()
+              assert any('huddle_cluster.py' in n for n in names), 'huddle_cluster.py missing from sdist'
+              print(f'Sdist OK: {tgz}')
+          "
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

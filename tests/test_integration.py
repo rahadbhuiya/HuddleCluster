@@ -211,7 +211,23 @@ class TestSlowServerDetection(IntegrationBase):
     """Slow server should be detected and evicted via latency feedback."""
 
     def test_slow_server_evicted(self):
-        cluster = self._cluster(absolute_latency_floor_ms=200.0)
+        # Cross-platform fix: on Windows, HTTP overhead (~30-60ms) raises all
+        # server latencies equally, so the relative anomaly between slow and
+        # normal servers is smaller than on Linux.
+        #
+        # Two complementary eviction mechanisms are used:
+        #   1. absolute_latency_floor_ms=90: catches Windows where
+        #      s2_slow (80ms delay + overhead) exceeds the floor.
+        #   2. heat_threshold=0.4 / cool_threshold=0.15: catches lower-overhead
+        #      environments where the relative anomaly (~0.4-0.6) is enough.
+        #
+        # Normal servers (12-18ms + overhead) stay well below the 90ms floor,
+        # so no false evictions occur on typical machines.
+        cluster = self._cluster(
+            absolute_latency_floor_ms=90.0,
+            heat_threshold=0.4,
+            cool_threshold=0.15,
+        )
 
         # Find s2
         s2 = next(s for s in cluster.all_servers() if s.id == "s2")
@@ -243,7 +259,9 @@ class TestSlowServerDetection(IntegrationBase):
     def test_on_eviction_fires(self):
         evicted = []
         cluster = self._cluster(
-            absolute_latency_floor_ms=200.0,
+            absolute_latency_floor_ms=90.0,
+            heat_threshold=0.4,
+            cool_threshold=0.15,
             on_eviction=lambda s, r: evicted.append(s.id)
         )
         try:

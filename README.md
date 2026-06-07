@@ -1,11 +1,17 @@
 # HuddleCluster
 
+<p align="center">
+  <img src="assets/logo.svg" width="400" alt="HuddleCluster logo"/>
+</p>
+
+
+
 A penguin-inspired, self-organizing server load balancer with adaptive thermal eviction.
 
 **Author:** Rahad Bhuiya
-**Version:** 1.3.3
+**Version:** 1.4.0
 **License:** MIT
-**Paper:** [HuddleCluster: A Penguin-Inspired Self-Organizing Load Balancer with Adaptive Thermal Eviction](https://github.com/rahadbhuiya/HuddleCluster/blob/main/docs/HuddleCluster_Paper.pdf)
+**Paper:** [HuddleCluster: A Penguin-Inspired Self-Organizing Load Balancer with Adaptive Thermal Eviction](https://github.com/rahadbhuiya/HuddleCluster/blob/main/docs/HuddleCluster.pdf)
 
 ---
 
@@ -107,11 +113,19 @@ docker compose down
 ## Quick Start
 
 ```bash
-pip install -e .
-# with benchmark dependencies:
-pip install -e ".[benchmark]"
+pip install huddle-cluster
 # with FastAPI integration:
-pip install -e ".[fastapi]"
+pip install "huddle-cluster[fastapi]"
+# with Redis backend:
+pip install "huddle-cluster[redis]"
+# with gRPC support:
+pip install "huddle-cluster[grpc]"
+# with Kubernetes discovery:
+pip install "huddle-cluster[kubernetes]"
+# with benchmark dependencies:
+pip install "huddle-cluster[benchmark]"
+# everything:
+pip install "huddle-cluster[fastapi,redis,grpc,kubernetes,simulation,benchmark]"
 ```
 
 ```python
@@ -234,16 +248,143 @@ functional without gossip -- it is purely additive.
 
 ---
 
+## v1.4.0 Features
+
+### Persistent State
+
+Save and restore cluster temperature state across restarts. Prevents
+cold-start degradation after rolling deploys.
+
+```python
+cluster = HuddleCluster(
+    state_file="huddle_state.json",
+    checkpoint_interval_sec=30.0,   # auto-save every 30 seconds
+)
+cluster.start()
+# State is saved on stop() and restored on the next start()
+```
+
+### Webhook Alerting
+
+Receive HTTP POST notifications on eviction, promotion, or health events.
+
+```python
+cluster = HuddleCluster(
+    alert_webhooks=["https://hooks.example.com/cluster"],
+    alert_on={"eviction", "promotion", "health_fail"},
+    alert_headers={"Authorization": "Bearer my-token"},
+)
+```
+
+### Built-in HTTP Health Checker
+
+Probe upstream servers directly without an external health check loop.
+Failed servers are evicted automatically.
+
+```python
+cluster = HuddleCluster(
+    health_check_path="/health",
+    health_check_interval_sec=10.0,
+    health_check_timeout_sec=3.0,
+    health_check_failures=2,          # evict after 2 consecutive failures
+)
+```
+
+### Redis Backend (huddle_cluster_pkg)
+
+Share temperature state between HuddleCluster instances on different
+hosts so all nodes start with the same baseline after a rolling restart.
+
+```python
+pip install "huddle-cluster[redis]"
+```
+
+```python
+from huddle_cluster import create_cluster
+from huddle_cluster_pkg.backends_redis import RedisBackend
+
+backend = RedisBackend(url="redis://localhost:6379", key="huddle:state")
+cluster = create_cluster([...])
+cluster.start()
+
+backend.start_auto_sync(cluster, interval_sec=30.0)
+# ...
+backend.stop_auto_sync()
+```
+
+### gRPC Support (huddle_cluster_pkg)
+
+Thermal-aware gRPC channel routing using the same dual-ring algorithm.
+
+```python
+pip install "huddle-cluster[grpc]"
+```
+
+```python
+from huddle_cluster_pkg.grpc_cluster import create_grpc_cluster
+
+cluster = create_grpc_cluster([
+    ("s1", "10.0.0.1", 50051),
+    ("s2", "10.0.0.2", 50051),
+])
+cluster.start()
+
+with cluster.get_channel() as channel:
+    stub = MyService.Stub(channel)
+    response = stub.MyMethod(request)
+
+cluster.stop()
+```
+
+### Kubernetes Service Discovery (huddle_cluster_pkg)
+
+Auto-add and remove servers as Kubernetes pods come and go.
+
+```python
+pip install "huddle-cluster[kubernetes]"
+```
+
+```python
+from huddle_cluster import create_cluster
+from huddle_cluster_pkg.discovery_k8s import K8sDiscovery
+
+discovery = K8sDiscovery(
+    namespace="production",
+    label_selector="app=api-server",
+    port=8080,
+)
+cluster = create_cluster([], min_inner_size=1)
+cluster.start()
+discovery.start(cluster)
+# ...
+discovery.stop()
+cluster.stop()
+```
+
+---
+
 ## File Structure
 
 ```
 HuddleCluster/
 |
-|-- huddle_cluster.py              # Core library v1.3.0 (zero runtime dependencies)
+|-- huddle_cluster.py              # Core library v1.4.0 (zero runtime dependencies)
+|-- huddle_cluster.pyi             # Type stubs for IDE autocomplete (PEP 561)
 |-- __init__.py                    # Package exports
 |-- pyproject.toml                 # pip install support
 |-- requirements.txt               # Optional dependencies by feature
 |-- LICENSE
+|-- USAGE.md                       # Documentation 
+|
+|-- huddle_cluster_pkg/            # Optional extension modules (v1.4.0)
+|   |-- __init__.py
+|   |-- backends_redis.py          # Redis shared-state backend
+|   |-- grpc_cluster.py            # Thermal-aware gRPC channel routing
+|   |-- discovery_k8s.py           # Kubernetes pod auto-discovery
+|   |-- core.py                    # Shared internals
+|
+├── assets/
+│   └── logo.svg                   # LOGO
 |
 |-- benchmarks/
 |   |-- benchmark.py               # Simulated 4-scenario benchmark
@@ -257,18 +398,36 @@ HuddleCluster/
 |   |   |-- nginx_lc.conf          # NGINX least-connections config
 |   |-- run_http_benchmark.bat     # Windows one-click runner
 |
-|-- tests/
-|   |-- test_rotation.py           # Rotation, eviction, feedback loop (45 tests)
+|-- tests/                         # 427 tests across 17 modules
+|   |-- test_rotation.py           # Rotation, eviction, feedback loop
 |   |-- test_fairness.py           # Fairness and Gini tests
 |   |-- test_stress.py             # Concurrent load tests
+|   |-- test_histogram.py          # Latency histogram and percentile tests
+|   |-- test_integration.py        # FastAPI end-to-end tests
+|   |-- test_admin_api.py          # Admin HTTP endpoint tests
+|   |-- test_dashboard.py          # Dashboard and SSE tests
+|   |-- test_alerting.py           # Webhook alerting tests
+|   |-- test_canary.py             # Canary / traffic ramp tests
+|   |-- test_draining.py           # Connection draining tests
+|   |-- test_health_checker.py     # Built-in HTTP health checker tests
+|   |-- test_persistent_state.py   # State save/load/checkpoint tests
+|   |-- test_retry.py              # request_with_retry tests
+|   |-- test_sticky_sessions.py    # Affinity / sticky session tests
+|   |-- test_redis_backend.py      # Redis backend tests (uses fakeredis mock)
+|   |-- test_grpc_cluster.py       # gRPC cluster tests (uses grpc mock)
+|   |-- test_k8s_discovery.py      # K8s discovery tests (uses k8s mock)
 |   |-- conftest.py                # Shared fixtures
 |
 |-- examples/
 |   |-- fastapi_example.py         # FastAPI reverse proxy integration
-|   |-- simulation.py              # Terminal simulation
+|   |-- simulation.py              # Terminal simulation (requires rich)
+|   |-- dashboard_demo.py          # Live dashboard demo (open in browser)
 |   |-- HuddleSimulation.jsx       # React visual simulation
 |
 |-- docs/
+    |-- HuddleCluster.pdf              # Paper PDF
+    |-- HuddleCluster_arxiv.pdf        # Arxiv paper PDF
+    |-- HuddleCluster_arxiv.tex        # Arxiv tex file
     |-- diagrams/
         |-- architecture_diagram.png   # Dual-ring architecture
         |-- temperature_lifecycle.png  # State machine + weight composition
@@ -339,13 +498,29 @@ cluster = HuddleCluster(
     rotation_cooldown_sec      = 5.0,    # Minimum seconds between evictions per server
     min_outer_dwell_sec        = 10.0,   # Minimum rest time before re-entry
     ema_alpha                  = 0.60,   # Temperature smoothing (higher = faster reaction)
-    # v1.3.0 new parameters
+    # v1.3.0 parameters
     absolute_latency_floor_ms  = None,   # Evict any server above this absolute latency
     cold_start_sec             = 0.0,    # New servers warm up in outer ring for this long
     adaptive_thresholds        = False,  # Auto-adjust thresholds from cluster P95 history
     gossip_agent               = None,   # GossipAgent for distributed deployments
     metrics_updater            = None,   # Optional: fn(server) -> updates server.metrics
     on_rotation                = None,   # Optional: fn(RotationEvent) -> called on rotation
+    # v1.3.3 parameters
+    circuit_breaker_threshold  = 0.5,    # Fraction of failures to open circuit breaker
+    on_eviction                = None,   # Optional: fn(server, reason) -> called on eviction
+    request_timeout_ms         = None,   # Timeout threshold for dead-server detection
+    # v1.4.0 parameters
+    state_file                 = None,   # Path to JSON state file for persistence
+    checkpoint_interval_sec    = 0.0,    # Auto-save interval (0 = disabled)
+    alert_webhooks             = None,   # List of webhook URLs for event notifications
+    alert_on                   = None,   # Set of event types: "eviction", "promotion", "health_fail"
+    alert_headers              = None,   # Extra HTTP headers for webhook requests
+    alert_timeout_sec          = 5.0,    # Webhook request timeout
+    ws_drain_timeout_sec       = 0.0,    # Wait for WebSocket connections to close before eviction
+    health_check_path          = None,   # HTTP path to probe (e.g. "/health")
+    health_check_interval_sec  = 10.0,  # How often to probe each server
+    health_check_timeout_sec   = 3.0,   # Per-probe timeout
+    health_check_failures      = 2,      # Consecutive failures before eviction
 )
 ```
 
@@ -364,12 +539,18 @@ Default (heat=0.55, alpha=0.60) balances detection speed and eviction stability.
 ## Running Tests
 
 ```bash
-# All 45 tests
-python -m unittest tests/test_rotation.py tests/test_fairness.py tests/test_stress.py
+# Install test dependencies
+pip install -e ".[dev,fastapi]"
 
-# With pytest
-pip install ".[dev]"
+# Run all 427 tests
 pytest tests/ -v
+
+# Core tests only (no extra deps needed)
+pytest tests/test_rotation.py tests/test_fairness.py tests/test_stress.py tests/test_histogram.py -v
+
+# Extension tests (redis backend, grpc, k8s — all use mocks, no real services needed)
+pip install fakeredis
+pytest tests/test_redis_backend.py tests/test_grpc_cluster.py tests/test_k8s_discovery.py -v
 ```
 
 ---
@@ -427,9 +608,9 @@ Setup PyPI Trusted Publishing:
 
 ## Known Limitations
 
-- **Uniform burst load**: when all servers are equally stressed, relative anomaly scores are near zero and no eviction fires. An absolute latency floor is planned.
-- **Majority degradation**: if more than half the inner-ring servers degrade simultaneously, the median baseline rises. Use `absolute_latency_floor_ms` as a secondary guard in this scenario.
-- **Single-process**: temperature state is not shared across hosts. A gossip-protocol extension is planned.
+- **Uniform burst load**: when all servers are equally stressed, relative anomaly scores are near zero and no eviction fires. Use `absolute_latency_floor_ms` as a secondary guard.
+- **Majority degradation**: if more than half the inner-ring servers degrade simultaneously, the median baseline rises. Use `absolute_latency_floor_ms` in this scenario.
+- **Single-process by default**: temperature state is not shared across hosts without the Redis backend (`huddle_cluster_pkg.backends_redis`) or the gossip protocol (`GossipAgent`).
 - **Loopback benchmarks**: all HTTP benchmarks use localhost. Wide-area production validation is future work.
 
 ---
@@ -444,12 +625,21 @@ Setup PyPI Trusted Publishing:
 - [x] Real HTTP benchmark (FastAPI upstream servers) — v1.2.0
 - [x] Industry baseline benchmark (NGINX, Docker) — v1.2.0
 - [x] Failure-mode bounds (median robustness, oscillation, eviction rate) — v1.2.0
-- [x] Adaptive thresholds (auto-adjust heat/cool from cluster P95 history) -- v1.3.0
-- [x] Weighted server capacity (weight= param on Server/create_cluster) -- v1.3.0
-- [x] Cold start protection (cold_start_sec= param) -- v1.3.0
-- [x] Prometheus metrics exporter (cluster.prometheus_metrics()) -- v1.3.0
-- [x] Distributed temperature sharing (GossipAgent, UDP multicast) -- v1.3.0
-- [x] Absolute latency floor (absolute_latency_floor_ms= param) -- v1.3.0
+- [x] Adaptive thresholds (auto-adjust heat/cool from cluster P95 history) — v1.3.0
+- [x] Weighted server capacity (weight= param on Server/create_cluster) — v1.3.0
+- [x] Cold start protection (cold_start_sec= param) — v1.3.0
+- [x] Prometheus metrics exporter (cluster.prometheus_metrics()) — v1.3.0
+- [x] Distributed temperature sharing (GossipAgent, UDP multicast) — v1.3.0
+- [x] Absolute latency floor (absolute_latency_floor_ms= param) — v1.3.0
+- [x] Server tags/labels, on_eviction callback, throughput metrics — v1.3.3
+- [x] Circuit breaker, graceful shutdown, request_with_retry — v1.3.3
+- [x] Persistent state (state_file, checkpoint_interval_sec) — v1.4.0
+- [x] Webhook alerting (alert_webhooks, alert_on) — v1.4.0
+- [x] Built-in HTTP health checker (health_check_path) — v1.4.0
+- [x] WebSocket connection draining (ws_connection, ws_drain_timeout_sec) — v1.4.0
+- [x] Redis shared-state backend (huddle_cluster_pkg.backends_redis) — v1.4.0
+- [x] gRPC channel routing (huddle_cluster_pkg.grpc_cluster) — v1.4.0
+- [x] Kubernetes service discovery (huddle_cluster_pkg.discovery_k8s) — v1.4.0
 
 ---
 
@@ -458,6 +648,13 @@ Setup PyPI Trusted Publishing:
 ```
 Bhuiya, R. (2025). HuddleCluster: A Penguin-Inspired Self-Organizing Load Balancer
 with Adaptive Thermal Eviction. https://github.com/rahadbhuiya/HuddleCluster
+```
+```
+Bhuiya, Rahad (2026). HuddleCluster. figshare. Journal contribution. 
+https://doi.org/10.6084/m9.figshare.32397180
+```
+```
+Bhuiya. (2026). HuddleCluster. Zenodo. https://doi.org/10.5281/zenodo.20348019
 ```
 
 ---

@@ -14,7 +14,7 @@ Rotation Rules:
   - No central coordinator needed — threshold-driven, self-organizing
 
 Author : Rahad Bhuiya (inspired by Penguin Biology)
-Version: 1.3.0
+Version: 1.4.0
 License: MIT
 
 Changelog v1.3.0

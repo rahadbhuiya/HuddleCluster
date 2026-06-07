@@ -34,17 +34,17 @@ jobs:
         run: |
           cd benchmarks
           python -c "
-import benchmark_statistical as bs
-bs.N_TRIALS = int('$N_TRIALS')
-print(f'Running {bs.N_TRIALS} trials...')
-r1 = bs.scenario_normal_small()
-r2 = bs.scenario_slow_small()
-r3 = bs.scenario_failure_small()
-bs.print_summary(
-    {'Normal Load': r1, 'Slow Server (5x)': r2, 'Server Failure': r3},
-    ['Normal Load','Slow Server (5x)','Server Failure']
-)
-"
+          import benchmark_statistical as bs
+          bs.N_TRIALS = int('$N_TRIALS')
+          print(f'Running {bs.N_TRIALS} trials...')
+          r1 = bs.scenario_normal_small()
+          r2 = bs.scenario_slow_small()
+          r3 = bs.scenario_failure_small()
+          bs.print_summary(
+              {'Normal Load': r1, 'Slow Server (5x)': r2, 'Server Failure': r3},
+              ['Normal Load','Slow Server (5x)','Server Failure']
+          )
+          "
 
       - name: Upload benchmark charts
         uses: actions/upload-artifact@v4

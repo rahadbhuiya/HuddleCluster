@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 //  Constants 
-const HEAT_THRESHOLD    = 0.75;
+const HEAT_THRESHOLD    = 0.55;
 const COOL_THRESHOLD    = 0.30;
-const EMA_ALPHA         = 0.25;
+const EMA_ALPHA         = 0.60;
 const MAX_INNER         = 4;
 const MIN_INNER         = 2;
 const MIN_OUTER_DWELL   = 4000;  // ms

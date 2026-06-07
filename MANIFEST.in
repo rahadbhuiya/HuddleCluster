@@ -2,3 +2,4 @@ include LICENSE
 include README.md
 include py.typed
 recursive-include huddle_cluster *.py *.pyi
+recursive-include huddle_cluster_pkg *.py
