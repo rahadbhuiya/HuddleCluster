@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.4.1] - 2026-06-08
+
+### Fixed
+- Fix wheel packaging: huddle_cluster.py was missing from the built wheel
+  due to incorrect setuptools configuration (py-modules was not declared)
+- Bump version to 1.4.1 to allow re-upload to PyPI (1.4.0 wheel was
+  already uploaded with the broken build)
+
 ## [1.4.0] - 2026-06-07
 
 ### Added

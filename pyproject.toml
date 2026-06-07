@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "huddle-cluster"
-version = "1.4.0"
+version = "1.4.1"
 description = "A penguin-inspired self-organizing server load balancer with adaptive thermal eviction"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -71,9 +71,12 @@ Documentation = "https://github.com/rahadbhuiya/HuddleCluster/blob/main/USAGE.md
 "Bug Tracker" = "https://github.com/rahadbhuiya/HuddleCluster/issues"
 Paper = "https://github.com/rahadbhuiya/HuddleCluster/blob/main/docs/HuddleCluster.pdf"
 
+[tool.setuptools]
+py-modules = ["huddle_cluster"]
+
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["huddle_cluster*"]
+include = ["huddle_cluster_pkg*"]
 
 [tool.setuptools.package-data]
 huddle_cluster = ["py.typed"]

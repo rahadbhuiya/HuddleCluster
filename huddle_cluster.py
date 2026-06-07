@@ -14,7 +14,7 @@ Rotation Rules:
   - No central coordinator needed — threshold-driven, self-organizing
 
 Author : Rahad Bhuiya (inspired by Penguin Biology)
-Version: 1.4.0
+Version: 1.4.1
 License: MIT
 
 Changelog v1.4.0
@@ -125,7 +125,7 @@ from enum import Enum
 from typing import Any, Callable, Generator, Optional
 
 #  Version 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 __author__  = "Rahad Bhuiya"
 __license__ = "MIT"
 
@@ -2055,8 +2055,10 @@ class HuddleCluster:
             except Exception as exc:
                 log.warning(f"Auto-checkpoint failed: {exc}")
 
+    
     # Built-in HTTP health checker
     
+
     def _health_check_loop(self) -> None:
         """
         Background thread: ping each server's health endpoint periodically.
@@ -2716,9 +2718,9 @@ src.onerror=()=>{document.getElementById('err').style.display='block'};
         """
         return [a.to_dict() for a in list(self._alert_history)[-limit:]]
 
-    # ------------------------------------------------------------------
+    
     # Persistent state
-    # ------------------------------------------------------------------
+    
 
     def save_state(self, path: Optional[str] = None) -> str:
         """
