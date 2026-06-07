@@ -45,7 +45,7 @@ jobs:
                  tests/test_retry.py tests/test_sticky_sessions.py -v
 
       - name: Install extension test dependencies
-        run: pip install ".[redis]" fakeredis
+        run: pip install ".[redis,kubernetes]" fakeredis
 
       - name: Run extension tests (redis, grpc, k8s -- all use mocks)
         run: |
