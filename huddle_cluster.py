@@ -107,7 +107,6 @@ import heapq
 import http.server
 import json
 import logging
-import math
 import os
 import queue as _queue
 import random
@@ -123,7 +122,7 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Generator, List, Optional
+from typing import Any, Callable, Generator, Optional
 
 #  Version 
 __version__ = "1.4.0"
@@ -2056,10 +2055,8 @@ class HuddleCluster:
             except Exception as exc:
                 log.warning(f"Auto-checkpoint failed: {exc}")
 
-    
     # Built-in HTTP health checker
     
-
     def _health_check_loop(self) -> None:
         """
         Background thread: ping each server's health endpoint periodically.
@@ -2719,9 +2716,9 @@ src.onerror=()=>{document.getElementById('err').style.display='block'};
         """
         return [a.to_dict() for a in list(self._alert_history)[-limit:]]
 
-    
+    # ------------------------------------------------------------------
     # Persistent state
-    
+    # ------------------------------------------------------------------
 
     def save_state(self, path: Optional[str] = None) -> str:
         """
@@ -3403,10 +3400,9 @@ def create_cluster(
 #  Demo 
 
 if __name__ == "__main__":
-    import random
     from time import sleep
 
-    print("HuddleCluster v1.3.0 demo")
+    print("HuddleCluster v1.4.0 demo")
 
     cluster = create_cluster([
         ("s1", "127.0.0.1", 8001),
