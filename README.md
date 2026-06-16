@@ -9,7 +9,7 @@
 A penguin-inspired, self-organizing server load balancer with adaptive thermal eviction.
 
 **Author:** Rahad Bhuiya
-**Version:** 1.4.1
+**Version:** 2.0.0
 **License:** MIT
 **Paper:** [HuddleCluster: A Penguin-Inspired Self-Organizing Load Balancer with Adaptive Thermal Eviction](https://github.com/rahadbhuiya/HuddleCluster/blob/main/docs/HuddleCluster.pdf)
 
@@ -363,6 +363,102 @@ cluster.stop()
 
 ---
 
+
+## v2.0.0 — Cluster System
+
+> **Level 1: Basic Cluster System** — adds a true master/agent distributed
+> layer on top of the existing single-process HuddleCluster.
+
+### Starting a Master
+
+```bash
+# CLI (installed with pip install huddle-cluster)
+huddle-cluster master start --port 7070 --timeout 30
+```
+
+Or in Python:
+
+```python
+from huddle_cluster_pkg import MasterNode
+
+master = MasterNode(
+    host="0.0.0.0",
+    port=7070,
+    heartbeat_timeout_sec=30,
+    on_node_join=lambda n: print(f"joined:  {n.node_id}"),
+    on_node_leave=lambda n: print(f"left:    {n.node_id}"),
+    on_node_dead=lambda n: print(f"dead:    {n.node_id}"),
+)
+master.start()    # non-blocking
+```
+
+### Starting an Agent
+
+```bash
+# CLI
+huddle-cluster agent start \
+    --id web-01 \
+    --master http://192.168.1.10:7070 \
+    --port 8080 \
+    --interval 10 \
+    --meta region=us-east role=lb
+```
+
+Or in Python (optionally paired with a HuddleCluster):
+
+```python
+from huddle_cluster import create_cluster
+from huddle_cluster_pkg import AgentNode
+
+cluster = create_cluster(["s1:8001", "s2:8002", "s3:8003"])
+cluster.start()
+
+agent = AgentNode(
+    node_id="web-01",
+    master_url="http://192.168.1.10:7070",
+    port=8080,
+    cluster=cluster,                    # forwards live metrics to master
+    heartbeat_interval_sec=10,
+    metadata={"region": "us-east"},
+    on_master_unreachable=lambda: print("master is down"),
+    on_recovered=lambda: print("master is back"),
+)
+agent.start()
+```
+
+### CLI Reference
+
+| Command | Description |
+|---|---|
+| `huddle-cluster master start [--host] [--port] [--timeout]` | Start master node |
+| `huddle-cluster agent start --id --master --port [options]` | Start agent node |
+| `huddle-cluster nodes list [--master]` | List all registered nodes |
+| `huddle-cluster nodes status NODE_ID [--master]` | Inspect one node |
+| `huddle-cluster cluster status [--master]` | Cluster summary |
+| `huddle-cluster cluster health [--master]` | Quick health check (exit 1 if down) |
+
+### Master REST API
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/health` | `{"status": "ok"}` |
+| `GET` | `/v1/status` | Cluster summary (node counts, uptime) |
+| `GET` | `/v1/nodes` | List all nodes |
+| `GET` | `/v1/nodes/{id}` | Single node record |
+| `POST` | `/v1/nodes/join` | Agent enrollment |
+| `POST` | `/v1/nodes/{id}/heartbeat` | Heartbeat + metrics |
+| `DELETE` | `/v1/nodes/{id}` | Graceful departure |
+
+### Behaviour Highlights
+
+- **Dead detection** — a node is marked `dead` if no heartbeat arrives within
+  `heartbeat_timeout_sec`; it auto-recovers to `alive` when heartbeats resume
+- **Auto-rejoin** — if the master restarts and loses registrations, each agent
+  re-registers itself within 3 × heartbeat_interval automatically
+- **Fast shutdown** — `master.stop()` and `agent.stop()` complete in < 100 ms
+
+---
+
 ## File Structure
 
 ```
@@ -398,7 +494,7 @@ HuddleCluster/
 |   |   |-- nginx_lc.conf          # NGINX least-connections config
 |   |-- run_http_benchmark.bat     # Windows one-click runner
 |
-|-- tests/                         # 427 tests across 17 modules
+|-- tests/                         # 485 tests across 19 modules
 |   |-- test_rotation.py           # Rotation, eviction, feedback loop
 |   |-- test_fairness.py           # Fairness and Gini tests
 |   |-- test_stress.py             # Concurrent load tests
@@ -416,6 +512,8 @@ HuddleCluster/
 |   |-- test_redis_backend.py      # Redis backend tests (uses fakeredis mock)
 |   |-- test_grpc_cluster.py       # gRPC cluster tests (uses grpc mock)
 |   |-- test_k8s_discovery.py      # K8s discovery tests (uses k8s mock)
+|   |-- test_cluster_master.py     # MasterNode tests — 32 tests (v2.0.0)
+|   |-- test_cluster_agent.py      # AgentNode tests  — 26 tests (v2.0.0)
 |   |-- conftest.py                # Shared fixtures
 |
 |-- examples/
@@ -640,6 +738,30 @@ Setup PyPI Trusted Publishing:
 - [x] Redis shared-state backend (huddle_cluster_pkg.backends_redis) — v1.4.0
 - [x] gRPC channel routing (huddle_cluster_pkg.grpc_cluster) — v1.4.0
 - [x] Kubernetes service discovery (huddle_cluster_pkg.discovery_k8s) — v1.4.0
+
+**Level 1 — Basic Cluster System (v2.0.0)**
+- [x] Dedicated MasterNode — HTTP REST coordinator, node registry — v2.0.0
+- [x] AgentNode — enrollment, heartbeat loop, graceful leave — v2.0.0
+- [x] Node join/leave protocol with re-join on master restart — v2.0.0
+- [x] Heartbeat monitoring with auto dead-detection and recovery — v2.0.0
+- [x] Node list with status, metrics, last-seen-ago — v2.0.0
+- [x] `huddle-cluster` CLI (master start, agent start, nodes list, cluster status) — v2.0.0
+
+**Level 2 — Production Ready (planned)**
+- [ ] Auto recovery — respawn dead agents, health-gate promotions
+- [ ] Web dashboard — real-time cluster topology view
+- [ ] RBAC / authentication — API key and role-based access
+- [ ] Monitoring — Prometheus metrics from master
+- [ ] Structured metrics aggregation — per-node and cluster-wide stats
+- [ ] REST API — full OpenAPI spec with versioning
+
+**Level 3 — Kubernetes / Swarm-grade (planned)**
+- [ ] Scheduler — place workloads on nodes based on thermal fitness
+- [ ] Auto scaling — scale node count based on load signals
+- [ ] Rolling updates — zero-downtime cluster upgrades
+- [ ] Service discovery — DNS + health-aware record publishing
+- [ ] High-availability master — Raft-based consensus, no SPOF
+- [ ] Multi-region support — cross-datacenter topology awareness
 
 ---
 

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "huddle-cluster"
-version = "1.4.1"
-description = "A penguin-inspired self-organizing server load balancer with adaptive thermal eviction"
+version = "2.0.0"
+description = "A penguin-inspired self-organizing server load balancer with adaptive thermal eviction — now with master/agent cluster management"
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Rahad Bhuiya", email = "rahadbhuiya2021@gmail.com" }]
@@ -13,8 +13,8 @@ requires-python = ">=3.10"
 dependencies = []
 keywords = [
     "load-balancer", "load-balancing", "distributed-systems",
-    "server-routing", "bio-inspired", "penguin", "self-organizing",
-    "adaptive", "anomaly-detection", "fairness"
+    "cluster", "master", "agent", "server-routing", "bio-inspired",
+    "penguin", "self-organizing", "adaptive", "anomaly-detection", "fairness"
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -30,6 +30,9 @@ classifiers = [
     "Topic :: System :: Networking",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+
+[project.scripts]
+huddle-cluster = "huddle_cluster_pkg.cli:main"
 
 [project.optional-dependencies]
 fastapi = [
@@ -65,23 +68,23 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/rahadbhuiya/HuddleCluster"
-Repository = "https://github.com/rahadbhuiya/HuddleCluster"
+Homepage      = "https://github.com/rahadbhuiya/HuddleCluster"
+Repository    = "https://github.com/rahadbhuiya/HuddleCluster"
 Documentation = "https://github.com/rahadbhuiya/HuddleCluster/blob/main/USAGE.md"
 "Bug Tracker" = "https://github.com/rahadbhuiya/HuddleCluster/issues"
-Paper = "https://github.com/rahadbhuiya/HuddleCluster/blob/main/docs/HuddleCluster.pdf"
+Paper         = "https://github.com/rahadbhuiya/HuddleCluster/blob/main/docs/HuddleCluster.pdf"
 
 [tool.setuptools]
 py-modules = ["huddle_cluster"]
 
 [tool.setuptools.packages.find]
-where = ["."]
+where   = ["."]
 include = ["huddle_cluster_pkg*"]
 
 [tool.setuptools.package-data]
-huddle_cluster = ["py.typed"]
+huddle_cluster     = ["py.typed"]
 huddle_cluster_pkg = ["py.typed"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths  = ["tests"]
 pythonpath = ["."]

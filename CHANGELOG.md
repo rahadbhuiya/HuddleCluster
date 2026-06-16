@@ -5,6 +5,75 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.0.0] - 2026-06-16
+
+### Added — Level 1: Basic Cluster System
+
+**MasterNode** (`huddle_cluster_pkg.cluster_master`)
+- Dedicated master node that acts as the central coordinator for multi-node
+  HuddleCluster deployments — does not route traffic itself, only manages topology
+- Node enrollment via `POST /v1/nodes/join` with address, port, and arbitrary metadata
+- Graceful departure via `DELETE /v1/nodes/{id}`
+- Heartbeat reception via `POST /v1/nodes/{id}/heartbeat` with live metrics payload
+- Automatic dead-node detection: marks nodes as `dead` when heartbeats stop arriving
+  within `heartbeat_timeout_sec` (configurable, default 30 s)
+- Auto-recovery: nodes flip back to `alive` the moment a heartbeat is received again
+- Event callbacks: `on_node_join`, `on_node_leave`, `on_node_dead`
+- REST API: `GET /v1/health`, `GET /v1/status`, `GET /v1/nodes`, `GET /v1/nodes/{id}`
+- All responses are JSON; HTTP status codes used correctly (200 / 400 / 404)
+- HTTP server poll interval set to 50 ms for near-instant graceful shutdown
+
+**AgentNode** (`huddle_cluster_pkg.cluster_agent`)
+- Per-node agent that wraps an optional `HuddleCluster` and handles all master
+  communication: join → heartbeat loop → graceful leave
+- Automatic local-IP detection when `address` is not supplied
+- Configurable heartbeat interval (default 10 s)
+- Retry-with-backoff on initial join (`retry` + exponential backoff)
+- `threading.Event`-based heartbeat sleep: `stop()` returns in < 50 ms regardless
+  of interval length
+- Metrics forwarding: `inner_servers`, `outer_servers`, `fairness_score`,
+  `rotation_count`, `requests_per_sec` included in every heartbeat payload
+- Callbacks: `on_master_unreachable` (first consecutive failure), `on_recovered`
+  (first success after outage)
+- Auto-rejoin: when master is reachable but doesn't know the node (e.g. after
+  master restart), agent re-registers every 3rd consecutive heartbeat failure
+- Correctly distinguishes `HTTPError` (master reachable, rejoin needed) from
+  `URLError` (master unreachable, wait and retry) in the HTTP helper
+- `start()` is now genuinely non-blocking: the initial join (with retry/backoff)
+  runs inside the background thread instead of the caller's thread. Fixes a
+  Windows-specific issue where connecting to a port nothing is listening on
+  does not fail instantly (unlike Linux/macOS) and was blocking `start()` for
+  up to the full socket timeout
+- New `request_timeout_sec` constructor parameter (default 3.0s, was a
+  hardcoded 5.0s) controls the per-HTTP-call socket timeout for join,
+  heartbeat, and leave requests
+- Join backoff sleep is now interruptible via the stop event, so `stop()`
+  returns promptly even if called mid-retry
+
+**CLI** (`huddle_cluster_pkg.cli` / `huddle-cluster` command)
+- Installed as the `huddle-cluster` command via `pyproject.toml` entry point
+- `huddle-cluster master start  [--host] [--port] [--timeout]`
+- `huddle-cluster agent  start  --id --master --port [--address] [--interval] [--retry] [--meta k=v ...]`
+- `huddle-cluster nodes  list   [--master]`
+- `huddle-cluster nodes  status NODE_ID [--master]`
+- `huddle-cluster cluster status [--master]`
+- `huddle-cluster cluster health [--master]`  (exits 1 if not healthy)
+
+**Tests**
+- `tests/test_cluster_master.py` — 32 tests covering health, join, heartbeat,
+  leave, node detail, status counts, callbacks, timeout, recovery, concurrency
+- `tests/test_cluster_agent.py` — 26 tests covering init validation, join,
+  heartbeat, leave, status, callbacks (unreachable, recovered), multi-agent,
+  restart, and non-blocking start() regression
+
+**Package**
+- `huddle_cluster_pkg/__init__.py` updated: exports `MasterNode`, `NodeRecord`,
+  `AgentNode` at top level
+- `pyproject.toml` bumped to 2.0.0; `huddle-cluster` CLI entry point registered
+
+---
+
+
 ## [1.4.1] - 2026-06-08
 
 ### Fixed

@@ -1,19 +1,42 @@
 """
-huddle_cluster_pkg — Optional extension modules for HuddleCluster.
+huddle_cluster_pkg — Extension package for HuddleCluster.
+==========================================================
 
-Modules
--------
-backends_redis   Redis shared-state backend for multi-node deployments.
-grpc_cluster     Thermal-aware gRPC channel routing.
-discovery_k8s    Kubernetes pod auto-discovery via the Watch API.
+Cluster management (v2.0.0)
+----------------------------
+    MasterNode      Central coordinator: node registry, heartbeat tracking,
+                    REST API for CLI and dashboards.
+    AgentNode       Per-node agent: joins master, sends heartbeats, reports
+                    live thermal metrics from a HuddleCluster instance.
+    NodeRecord      Dataclass representing a registered node in the master.
 
-Each module declares its own external dependency and raises a clear
-ImportError with an install hint when that dependency is absent.
+Third-party backends (optional, require extra dependencies)
+-----------------------------------------------------------
+    RedisClusterBackend   Redis shared-state for multi-process deployments.
+                          pip install "huddle-cluster[redis]"
+    GrpcCluster           Thermal-aware gRPC channel routing.
+                          pip install "huddle-cluster[grpc]"
+    KubernetesDiscovery   Kubernetes pod auto-discovery via Watch API.
+                          pip install "huddle-cluster[kubernetes]"
 
-Install extras
---------------
-    pip install "huddle-cluster[redis]"
-    pip install "huddle-cluster[grpc]"
-    pip install "huddle-cluster[kubernetes]"
-    pip install "huddle-cluster[redis,grpc,kubernetes]"
+CLI
+---
+    After installation the ``huddle-cluster`` command is available:
+
+        huddle-cluster master  start  [--port 7070]
+        huddle-cluster agent   start  --id NODE_ID --master URL --port PORT
+        huddle-cluster nodes   list
+        huddle-cluster nodes   status NODE_ID
+        huddle-cluster cluster status
+        huddle-cluster cluster health
 """
+
+from huddle_cluster_pkg.cluster_master import MasterNode, NodeRecord
+from huddle_cluster_pkg.cluster_agent  import AgentNode
+
+__all__ = [
+    # Cluster management
+    "MasterNode",
+    "NodeRecord",
+    "AgentNode",
+]
