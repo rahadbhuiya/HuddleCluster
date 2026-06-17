@@ -9,7 +9,7 @@
 A penguin-inspired, self-organizing server load balancer with adaptive thermal eviction.
 
 **Author:** Rahad Bhuiya
-**Version:** 2.0.0
+**Version:** 2.1.0
 **License:** MIT
 **Paper:** [HuddleCluster: A Penguin-Inspired Self-Organizing Load Balancer with Adaptive Thermal Eviction](https://github.com/rahadbhuiya/HuddleCluster/blob/main/docs/HuddleCluster.pdf)
 
@@ -430,7 +430,7 @@ agent.start()
 
 | Command | Description |
 |---|---|
-| `huddle-cluster master start [--host] [--port] [--timeout]` | Start master node |
+| `huddle-cluster master start [--host] [--port] [--timeout] [--flap-window] [--flap-threshold] [--quarantine-recovery] [--purge-after]` | Start master node |
 | `huddle-cluster agent start --id --master --port [options]` | Start agent node |
 | `huddle-cluster nodes list [--master]` | List all registered nodes |
 | `huddle-cluster nodes status NODE_ID [--master]` | Inspect one node |
@@ -449,10 +449,41 @@ agent.start()
 | `POST` | `/v1/nodes/{id}/heartbeat` | Heartbeat + metrics |
 | `DELETE` | `/v1/nodes/{id}` | Graceful departure |
 
+### Auto Recovery (Level 2)
+
+A node that dies and recovers repeatedly within a short window is not
+trusted immediately — it gets quarantined until it proves itself stable:
+
+```python
+from huddle_cluster_pkg import MasterNode
+
+master = MasterNode(
+    port=7070,
+    heartbeat_timeout_sec=30,
+    flap_window_sec=300,               # window for counting repeated deaths
+    flap_threshold=3,                  # deaths within window -> quarantine
+    quarantine_recovery_heartbeats=3,  # consecutive heartbeats to exit quarantine
+    purge_after_sec=3600,              # remove dead nodes after 1h (opt-in; None disables)
+    on_node_quarantined=lambda n: alert_ops(f"{n.node_id} is flapping"),
+    on_node_purged=lambda n: print(f"{n.node_id} purged from registry"),
+)
+master.start()
+```
+
+A quarantined node is excluded from `alive_nodes()` (so it won't be trusted
+for routing decisions) but keeps appearing in `nodes()` / `GET /v1/nodes`
+with `status: "quarantined"`, along with `death_count` and `recent_deaths`
+for visibility. The same flap check applies whether the node recovers via a
+heartbeat or via re-joining (a crash-looping agent is caught either way).
+Purge is disabled by default — set `purge_after_sec` explicitly to opt in,
+and keep it larger than `heartbeat_timeout_sec` (the master logs a warning
+otherwise).
+
 ### Behaviour Highlights
 
 - **Dead detection** — a node is marked `dead` if no heartbeat arrives within
   `heartbeat_timeout_sec`; it auto-recovers to `alive` when heartbeats resume
+  (or to `quarantined` if it has been flapping — see Auto Recovery above)
 - **Auto-rejoin** — if the master restarts and loses registrations, each agent
   re-registers itself within 3 × heartbeat_interval automatically
 - **Fast shutdown** — `master.stop()` and `agent.stop()` complete in < 100 ms
@@ -494,7 +525,7 @@ HuddleCluster/
 |   |   |-- nginx_lc.conf          # NGINX least-connections config
 |   |-- run_http_benchmark.bat     # Windows one-click runner
 |
-|-- tests/                         # 485 tests across 19 modules
+|-- tests/                         # 498 tests across 19 modules
 |   |-- test_rotation.py           # Rotation, eviction, feedback loop
 |   |-- test_fairness.py           # Fairness and Gini tests
 |   |-- test_stress.py             # Concurrent load tests
@@ -512,7 +543,7 @@ HuddleCluster/
 |   |-- test_redis_backend.py      # Redis backend tests (uses fakeredis mock)
 |   |-- test_grpc_cluster.py       # gRPC cluster tests (uses grpc mock)
 |   |-- test_k8s_discovery.py      # K8s discovery tests (uses k8s mock)
-|   |-- test_cluster_master.py     # MasterNode tests — 32 tests (v2.0.0)
+|   |-- test_cluster_master.py     # MasterNode tests — 45 tests (v2.0.0)
 |   |-- test_cluster_agent.py      # AgentNode tests  — 26 tests (v2.0.0)
 |   |-- conftest.py                # Shared fixtures
 |
@@ -748,7 +779,7 @@ Setup PyPI Trusted Publishing:
 - [x] `huddle-cluster` CLI (master start, agent start, nodes list, cluster status) — v2.0.0
 
 **Level 2 — Production Ready (planned)**
-- [ ] Auto recovery — respawn dead agents, health-gate promotions
+- [x] Auto recovery — flapping detection (quarantine) and stale-node purge — v2.0.0
 - [ ] Web dashboard — real-time cluster topology view
 - [ ] RBAC / authentication — API key and role-based access
 - [ ] Monitoring — Prometheus metrics from master

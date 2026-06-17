@@ -7,6 +7,8 @@ Commands
 --------
 
     huddle-cluster master start  [--host HOST] [--port PORT] [--timeout SEC]
+                                 [--flap-window SEC] [--flap-threshold N]
+                                 [--quarantine-recovery N] [--purge-after SEC]
 
     huddle-cluster agent  start  --id ID --master URL --port PORT
                                  [--address IP] [--interval SEC]
@@ -19,7 +21,7 @@ Commands
     huddle-cluster cluster health [--master URL]
 
 Author : Rahad Bhuiya
-Version: 2.0.0
+Version: 2.1.0
 License: MIT
 """
 
@@ -79,26 +81,42 @@ def cmd_master_start(args: argparse.Namespace) -> None:
         host=args.host,
         port=args.port,
         heartbeat_timeout_sec=args.timeout,
+        flap_window_sec=args.flap_window,
+        flap_threshold=args.flap_threshold,
+        quarantine_recovery_heartbeats=args.quarantine_recovery,
+        purge_after_sec=args.purge_after,
     )
 
     def on_join(node):
-        print(f"  ✓  JOIN   {node.node_id:<20} {node.address}:{node.port}")
+        print(f"  ✓  JOIN        {node.node_id:<20} {node.address}:{node.port}")
 
     def on_leave(node):
-        print(f"  ←  LEAVE  {node.node_id}")
+        print(f"  ←  LEAVE       {node.node_id}")
 
     def on_dead(node):
         ago = f"{node.last_seen_ago:.0f}s ago"
-        print(f"  ✗  DEAD   {node.node_id:<20} last seen {ago}")
+        print(f"  ✗  DEAD        {node.node_id:<20} last seen {ago}")
 
-    master._on_join  = on_join
-    master._on_leave = on_leave
-    master._on_dead  = on_dead
+    def on_quarantined(node):
+        print(f"  ⚠  QUARANTINE  {node.node_id:<20} {node.death_count} deaths recorded")
+
+    def on_purged(node):
+        print(f"  🗑  PURGED      {node.node_id}")
+
+    master._on_join        = on_join
+    master._on_leave       = on_leave
+    master._on_dead        = on_dead
+    master._on_quarantined = on_quarantined
+    master._on_purged      = on_purged
     master.start()
 
     print(f"\nHuddleCluster Master")
     print(f"  Listening : {args.host}:{args.port}")
     print(f"  HB timeout: {args.timeout}s")
+    print(f"  Flap rule : quarantine after {args.flap_threshold} deaths / "
+          f"{args.flap_window:.0f}s, recover after {args.quarantine_recovery} heartbeats")
+    if args.purge_after:
+        print(f"  Purge     : dead nodes removed after {args.purge_after:.0f}s")
     print(f"  API prefix: http://{args.host}:{args.port}{_API_V1}/")
     print("\n  Press Ctrl-C to stop.\n")
 
@@ -165,14 +183,14 @@ def cmd_nodes_list(args: argparse.Namespace) -> None:
         print("No nodes registered with the master.")
         return
 
-    hdr = f"{'NODE ID':<22} {'ADDRESS':<22} {'STATUS':<10} {'HB':<8} LAST SEEN"
+    hdr = f"{'NODE ID':<22} {'ADDRESS':<22} {'STATUS':<12} {'HB':<8} LAST SEEN"
     print(hdr)
     print("─" * len(hdr))
     for n in nodes:
         last = f"{n.get('last_seen_ago_sec', 0):.1f}s ago"
         addr = f"{n['address']}:{n['port']}"
         hb   = str(n.get("heartbeat_count", 0))
-        print(f"{n['node_id']:<22} {addr:<22} {n['status']:<10} {hb:<8} {last}")
+        print(f"{n['node_id']:<22} {addr:<22} {n['status']:<12} {hb:<8} {last}")
 
 
 def cmd_nodes_status(args: argparse.Namespace) -> None:
@@ -188,6 +206,7 @@ def cmd_cluster_status(args: argparse.Namespace) -> None:
     print(f"  Uptime      : {data.get('uptime_sec')}s")
     print(f"  Total nodes : {data.get('total_nodes', 0)}")
     print(f"  Alive       : {data.get('alive_nodes', 0)}")
+    print(f"  Quarantined : {data.get('quarantined_nodes', 0)}")
     print(f"  Dead        : {data.get('dead_nodes', 0)}")
     print(f"  HB timeout  : {data.get('heartbeat_timeout_sec')}s")
 
@@ -228,6 +247,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Listen port  (default: 7070)")
     ms.add_argument("--timeout", type=float, default=30.0,
                     help="Heartbeat timeout in seconds  (default: 30)")
+    ms.add_argument("--flap-window", type=float, default=300.0,
+                    help="Window in seconds for counting repeated deaths  (default: 300)")
+    ms.add_argument("--flap-threshold", type=int, default=3,
+                    help="Deaths within the window that trigger quarantine  (default: 3)")
+    ms.add_argument("--quarantine-recovery", type=int, default=3,
+                    help="Consecutive heartbeats needed to exit quarantine  (default: 3)")
+    ms.add_argument("--purge-after", type=float, default=None,
+                    help="Remove dead nodes from the registry after this many seconds "
+                         "(default: never purge)")
     ms.set_defaults(func=cmd_master_start)
 
     

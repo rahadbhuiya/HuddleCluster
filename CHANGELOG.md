@@ -5,6 +5,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.1.0] - 2026-06-17
+
+### Added — Level 2: Production Ready (in progress, 1/6)
+
+**Auto Recovery** (`huddle_cluster_pkg.cluster_master`)
+- Flapping detection: a node that dies and recovers `flap_threshold` or more
+  times within `flap_window_sec` is not trusted immediately — it is marked
+  `quarantined` instead of `alive`
+- Quarantine promotion: a quarantined node needs `quarantine_recovery_heartbeats`
+  consecutive heartbeats (the triggering heartbeat counts as #1) to be
+  promoted back to `alive` with a clean slate (death history cleared)
+- Quarantine applies uniformly whether the node recovers via heartbeat alone
+  or via re-join (crash-looping agents are caught the same way)
+- Quarantined nodes are excluded from `alive_nodes()` (not trusted for
+  routing) but are still subject to the normal heartbeat-timeout check, so a
+  quarantined node that stops heartbeating still becomes `dead`
+- Stale node purge: dead nodes are removed from the registry entirely after
+  `purge_after_sec` of silence (disabled by default — opt-in only, to avoid
+  surprising existing deployments)
+- New callbacks: `on_node_quarantined`, `on_node_purged`
+- New `MasterNode` method: `quarantined_nodes()`
+- `status()` now reports `quarantined_nodes`, `flap_window_sec`,
+  `flap_threshold`, `quarantine_recovery_heartbeats`, `purge_after_sec`
+- Defensive startup warning if `purge_after_sec` is configured smaller than
+  `heartbeat_timeout_sec` (would make nodes purge-eligible the instant they
+  die, leaving no grace period for recovery)
+- Heartbeat-monitor check interval no longer floors at 1 second — now scales
+  down to `heartbeat_timeout_sec / 5` (min 0.05s), so short timeouts are
+  detected responsively
+- CLI: `master start` gains `--flap-window`, `--flap-threshold`,
+  `--quarantine-recovery`, `--purge-after`; `cluster status` shows the
+  quarantined count; `nodes list` STATUS column widened for "quarantined"
+- 13 new tests (`TestAutoRecoveryFlapping`, `TestAutoRecoveryPurge`) — 45
+  total in `tests/test_cluster_master.py`
+
+### Fixed
+- `__version__` in `huddle_cluster.py` was still hardcoded to `1.4.1` after
+  the 2.0.0 release; now correctly tracks the package version
+
+---
+
 ## [2.0.0] - 2026-06-16
 
 ### Added — Level 1: Basic Cluster System
