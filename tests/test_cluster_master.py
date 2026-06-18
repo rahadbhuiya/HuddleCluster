@@ -31,6 +31,12 @@ def _get(port, path):
         return json.loads(r.read())
 
 
+def _get_text(port, path):
+    url = f"http://127.0.0.1:{port}/v1{path}"
+    with urllib.request.urlopen(url, timeout=3) as r:
+        return r.read().decode()
+
+
 def _post(port, path, payload):
     """POST and return the JSON body regardless of HTTP status code."""
     data = json.dumps(payload).encode()
@@ -61,6 +67,7 @@ def _delete(port, path):
         return json.loads(e.read())
 
 
+
 # Fixtures
 
 
@@ -72,7 +79,6 @@ def master():
     time.sleep(0.1)
     yield m
     m.stop()
-
 
 
 # Tests
@@ -696,5 +702,226 @@ class TestAutoRecoveryPurge:
             node = _get(port, "/nodes/pg4")   # must still exist, never purged
             assert node["node_id"] == "pg4"
             assert node["status"] in ("quarantined", "alive")
+        finally:
+            m.stop()
+
+
+class TestPrometheusMetrics:
+    def test_metrics_endpoint_content_type(self, master):
+        url = f"http://127.0.0.1:{master.port}/v1/metrics"
+        with urllib.request.urlopen(url, timeout=3) as r:
+            ctype = r.headers.get("Content-Type", "")
+            assert ctype.startswith("text/plain")
+
+    def test_metrics_contains_master_gauges(self, master):
+        text = _get_text(master.port, "/metrics")
+        assert "huddle_master_uptime_seconds" in text
+        assert "huddle_master_total_nodes" in text
+        assert "huddle_master_alive_nodes" in text
+        assert "huddle_master_dead_nodes" in text
+        assert "huddle_master_quarantined_nodes" in text
+        assert "huddle_master_unhealthy" in text
+
+    def test_metrics_has_help_and_type_lines(self, master):
+        text = _get_text(master.port, "/metrics")
+        assert "# HELP huddle_master_total_nodes" in text
+        assert "# TYPE huddle_master_total_nodes gauge" in text
+
+    def test_metrics_reflects_node_count(self, master):
+        _post(master.port, "/nodes/join", {
+            "node_id": "m1", "address": "127.0.0.1", "port": 9400,
+        })
+        text = _get_text(master.port, "/metrics")
+        assert "huddle_master_total_nodes 1" in text
+        assert "huddle_master_alive_nodes 1" in text
+
+    def test_metrics_contains_per_node_up_gauge(self, master):
+        _post(master.port, "/nodes/join", {
+            "node_id": "m2", "address": "127.0.0.1", "port": 9401,
+        })
+        text = _get_text(master.port, "/metrics")
+        assert 'huddle_node_up{node_id="m2"} 1' in text
+
+    def test_metrics_contains_heartbeat_and_death_counters(self, master):
+        _post(master.port, "/nodes/join", {
+            "node_id": "m3", "address": "127.0.0.1", "port": 9402,
+        })
+        _post(master.port, "/nodes/m3/heartbeat", {})
+        _post(master.port, "/nodes/m3/heartbeat", {})
+        text = _get_text(master.port, "/metrics")
+        assert 'huddle_node_heartbeat_count{node_id="m3"} 2' in text
+        assert 'huddle_node_death_count{node_id="m3"} 0' in text
+
+    def test_metrics_includes_forwarded_node_metrics_when_present(self, master):
+        _post(master.port, "/nodes/join", {
+            "node_id": "m4", "address": "127.0.0.1", "port": 9403,
+        })
+        _post(master.port, "/nodes/m4/heartbeat", {
+            "metrics": {"fairness_score": 0.87, "inner_servers": 4}
+        })
+        text = _get_text(master.port, "/metrics")
+        assert 'huddle_node_fairness_score{node_id="m4"} 0.87' in text
+        assert 'huddle_node_inner_servers{node_id="m4"} 4' in text
+
+    def test_metrics_omits_forwarded_fields_when_absent(self, master):
+        """A node that never forwarded fairness_score shouldn't get a line for it."""
+        _post(master.port, "/nodes/join", {
+            "node_id": "m5", "address": "127.0.0.1", "port": 9404,
+        })
+        _post(master.port, "/nodes/m5/heartbeat", {})   # no metrics payload
+        text = _get_text(master.port, "/metrics")
+        # No node in this test ever forwarded fairness_score, so the whole
+        # metric family should be absent rather than printed as 0.
+        assert "huddle_node_fairness_score" not in text
+
+    def test_metrics_quarantined_node_shows_half(self):
+        port = _free_port()
+        m = MasterNode(host="127.0.0.1", port=port,
+                        heartbeat_timeout_sec=0.4, flap_threshold=2)
+        m.start()
+        time.sleep(0.1)
+        try:
+            _post(port, "/nodes/join", {
+                "node_id": "m6", "address": "127.0.0.1", "port": 9405,
+            })
+            for _ in range(2):
+                time.sleep(0.6)
+                _post(port, "/nodes/m6/heartbeat", {})
+            text = _get_text(port, "/metrics")
+            assert 'huddle_node_up{node_id="m6"} 0.5' in text
+        finally:
+            m.stop()
+
+    def test_metrics_empty_cluster_does_not_error(self, master):
+        text = _get_text(master.port, "/metrics")
+        assert "huddle_master_total_nodes 0" in text
+
+
+class TestClusterHealthMonitoring:
+    def test_disabled_by_default_never_fires(self):
+        port = _free_port()
+        events = []
+        m = MasterNode(
+            host="127.0.0.1", port=port,
+            heartbeat_timeout_sec=0.3,
+            on_cluster_unhealthy=lambda s: events.append(s),
+        )
+        m.start()
+        time.sleep(0.1)
+        try:
+            _post(port, "/nodes/join", {
+                "node_id": "ch1", "address": "127.0.0.1", "port": 9500,
+            })
+            time.sleep(0.8)   # node dies, ratio drops to 0%, but feature is off
+            assert events == []
+        finally:
+            m.stop()
+
+    def test_empty_cluster_never_unhealthy(self):
+        port = _free_port()
+        events = []
+        m = MasterNode(
+            host="127.0.0.1", port=port,
+            heartbeat_timeout_sec=0.3,
+            unhealthy_alive_ratio=0.5,
+            on_cluster_unhealthy=lambda s: events.append(s),
+        )
+        m.start()
+        time.sleep(0.5)   # no nodes ever joined
+        try:
+            assert events == []
+        finally:
+            m.stop()
+
+    def test_unhealthy_fires_when_ratio_drops(self):
+        port = _free_port()
+        events = []
+        m = MasterNode(
+            host="127.0.0.1", port=port,
+            heartbeat_timeout_sec=0.3,
+            unhealthy_alive_ratio=0.5,   # need >=50% alive
+            on_cluster_unhealthy=lambda s: events.append(s),
+        )
+        m.start()
+        time.sleep(0.1)
+        try:
+            _post(port, "/nodes/join", {
+                "node_id": "ch2", "address": "127.0.0.1", "port": 9501,
+            })
+            _post(port, "/nodes/join", {
+                "node_id": "ch3", "address": "127.0.0.1", "port": 9502,
+            })
+            # keep ch3 alive, let ch2 die -> 1/2 = 50%, not below threshold yet
+            for _ in range(3):
+                time.sleep(0.1)
+                _post(port, "/nodes/ch3/heartbeat", {})
+            time.sleep(0.5)   # ch2 times out, ch3 also stops -> 0/2 alive
+            assert len(events) >= 1
+            assert events[-1]["alive_ratio"] < 0.5
+        finally:
+            m.stop()
+
+    def test_recovered_fires_after_ratio_restores(self):
+        port = _free_port()
+        unhealthy_events = []
+        recovered_events = []
+        m = MasterNode(
+            host="127.0.0.1", port=port,
+            heartbeat_timeout_sec=0.3,
+            unhealthy_alive_ratio=0.5,
+            on_cluster_unhealthy=lambda s: unhealthy_events.append(s),
+            on_cluster_recovered=lambda s: recovered_events.append(s),
+        )
+        m.start()
+        time.sleep(0.1)
+        try:
+            _post(port, "/nodes/join", {
+                "node_id": "ch4", "address": "127.0.0.1", "port": 9503,
+            })
+            time.sleep(0.6)   # dies -> 0/1 alive -> unhealthy
+            assert len(unhealthy_events) >= 1
+
+            _post(port, "/nodes/ch4/heartbeat", {})   # recovers -> 1/1 alive
+            time.sleep(0.2)
+            assert len(recovered_events) >= 1
+        finally:
+            m.stop()
+
+    def test_status_reports_unhealthy_flag(self):
+        port = _free_port()
+        m = MasterNode(
+            host="127.0.0.1", port=port,
+            heartbeat_timeout_sec=0.3,
+            unhealthy_alive_ratio=0.5,
+        )
+        m.start()
+        time.sleep(0.1)
+        try:
+            _post(port, "/nodes/join", {
+                "node_id": "ch5", "address": "127.0.0.1", "port": 9504,
+            })
+            time.sleep(0.6)
+            status = _get(port, "/status")
+            assert status["cluster_unhealthy"] is True
+            assert status["unhealthy_alive_ratio"] == 0.5
+        finally:
+            m.stop()
+
+    def test_metrics_unhealthy_gauge_reflects_state(self):
+        port = _free_port()
+        m = MasterNode(
+            host="127.0.0.1", port=port,
+            heartbeat_timeout_sec=0.3,
+            unhealthy_alive_ratio=0.5,
+        )
+        m.start()
+        time.sleep(0.1)
+        try:
+            _post(port, "/nodes/join", {
+                "node_id": "ch6", "address": "127.0.0.1", "port": 9505,
+            })
+            time.sleep(0.6)
+            text = _get_text(port, "/metrics")
+            assert "huddle_master_unhealthy 1" in text
         finally:
             m.stop()

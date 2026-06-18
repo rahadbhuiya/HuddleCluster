@@ -11,7 +11,7 @@ deployment.  It does NOT route traffic itself; instead it:
   - Exposes a REST API consumed by the CLI and external tooling
 
 Author : Rahad Bhuiya
-Version: 2.1.0
+Version: 2.2.0
 License: MIT
 """
 
@@ -38,7 +38,6 @@ _API_V1 = "/v1"
 
 
 # NodeRecord
-
 
 @dataclass
 class NodeRecord:
@@ -91,6 +90,7 @@ class MasterNode:
 
         GET  /v1/health                       → {"status": "ok"}
         GET  /v1/status                       → cluster summary
+        GET  /v1/metrics                      → Prometheus text exposition
         GET  /v1/nodes                        → list of all nodes
         GET  /v1/nodes/<id>                   → single node record
         POST /v1/nodes/join                   → register a new agent
@@ -115,11 +115,14 @@ class MasterNode:
         flap_threshold: int = DEFAULT_FLAP_THRESHOLD,
         quarantine_recovery_heartbeats: int = DEFAULT_QUARANTINE_RECOVERY,
         purge_after_sec: Optional[float] = None,
+        unhealthy_alive_ratio: Optional[float] = None,
         on_node_join: Optional[Callable[[NodeRecord], None]] = None,
         on_node_leave: Optional[Callable[[NodeRecord], None]] = None,
         on_node_dead: Optional[Callable[[NodeRecord], None]] = None,
         on_node_quarantined: Optional[Callable[[NodeRecord], None]] = None,
         on_node_purged: Optional[Callable[[NodeRecord], None]] = None,
+        on_cluster_unhealthy: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_cluster_recovered: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -138,6 +141,9 @@ class MasterNode:
                 purge_after_sec, heartbeat_timeout_sec,
             )
 
+        self._unhealthy_alive_ratio = unhealthy_alive_ratio
+        self._cluster_unhealthy = False
+
         self._nodes: Dict[str, NodeRecord] = {}
         self._lock = threading.RLock()
 
@@ -146,6 +152,8 @@ class MasterNode:
         self._on_dead = on_node_dead
         self._on_quarantined = on_node_quarantined
         self._on_purged = on_node_purged
+        self._on_cluster_unhealthy = on_cluster_unhealthy
+        self._on_cluster_recovered = on_cluster_recovered
 
         self._http: Optional[http.server.HTTPServer] = None
         self._http_thread: Optional[threading.Thread] = None
@@ -235,7 +243,124 @@ class MasterNode:
             "flap_threshold": self._flap_threshold,
             "quarantine_recovery_heartbeats": self._quarantine_recovery,
             "purge_after_sec": self._purge_after,
+            "cluster_unhealthy": self._cluster_unhealthy,
+            "unhealthy_alive_ratio": self._unhealthy_alive_ratio,
         }
+
+    def prometheus_metrics(self) -> str:
+        """
+        Prometheus text exposition format for a cluster-wide /v1/metrics
+        endpoint. Aggregates master-level counts plus, for each node, the
+        metrics it last forwarded via heartbeat (e.g. from an attached
+        HuddleCluster's own health_report()). Nodes that haven't forwarded
+        a given field simply don't get a line for it — Prometheus treats
+        missing label combinations as absent, not zero.
+        """
+        with self._lock:
+            nodes = list(self._nodes.values())
+            total       = len(nodes)
+            alive       = sum(1 for n in nodes if n.status == "alive")
+            dead        = sum(1 for n in nodes if n.status == "dead")
+            quarantined = sum(1 for n in nodes if n.status == "quarantined")
+            uptime      = time.time() - (self._started_at or time.time())
+            unhealthy   = self._cluster_unhealthy
+
+        lines = [
+            "# HELP huddle_master_uptime_seconds Seconds since the master started",
+            "# TYPE huddle_master_uptime_seconds gauge",
+            f"huddle_master_uptime_seconds {uptime:.1f}",
+            "",
+            "# HELP huddle_master_total_nodes Total nodes ever registered (any status)",
+            "# TYPE huddle_master_total_nodes gauge",
+            f"huddle_master_total_nodes {total}",
+            "",
+            "# HELP huddle_master_alive_nodes Nodes currently fully trusted",
+            "# TYPE huddle_master_alive_nodes gauge",
+            f"huddle_master_alive_nodes {alive}",
+            "",
+            "# HELP huddle_master_dead_nodes Nodes that missed their heartbeat deadline",
+            "# TYPE huddle_master_dead_nodes gauge",
+            f"huddle_master_dead_nodes {dead}",
+            "",
+            "# HELP huddle_master_quarantined_nodes Nodes flapping, not yet fully trusted",
+            "# TYPE huddle_master_quarantined_nodes gauge",
+            f"huddle_master_quarantined_nodes {quarantined}",
+            "",
+            "# HELP huddle_master_unhealthy 1 if alive-node ratio is below threshold, else 0",
+            "# TYPE huddle_master_unhealthy gauge",
+            f"huddle_master_unhealthy {1 if unhealthy else 0}",
+        ]
+
+        #  per-node gauges 
+
+        lines += [
+            "",
+            "# HELP huddle_node_up Node status as a number: 1=alive, 0.5=quarantined, 0=dead",
+            "# TYPE huddle_node_up gauge",
+        ]
+        status_value = {"alive": 1, "quarantined": 0.5, "dead": 0, "leaving": 0}
+        for n in nodes:
+            lines.append(
+                f'huddle_node_up{{node_id="{n.node_id}"}} '
+                f"{status_value.get(n.status, 0)}"
+            )
+
+        lines += [
+            "",
+            "# HELP huddle_node_heartbeat_count Total heartbeats received from this node",
+            "# TYPE huddle_node_heartbeat_count counter",
+        ]
+        for n in nodes:
+            lines.append(f'huddle_node_heartbeat_count{{node_id="{n.node_id}"}} {n.heartbeat_count}')
+
+        lines += [
+            "",
+            "# HELP huddle_node_death_count Total times this node has been marked dead",
+            "# TYPE huddle_node_death_count counter",
+        ]
+        for n in nodes:
+            lines.append(f'huddle_node_death_count{{node_id="{n.node_id}"}} {n.death_count}')
+
+        lines += [
+            "",
+            "# HELP huddle_node_last_seen_seconds Seconds since the last heartbeat",
+            "# TYPE huddle_node_last_seen_seconds gauge",
+        ]
+        for n in nodes:
+            lines.append(
+                f'huddle_node_last_seen_seconds{{node_id="{n.node_id}"}} {n.last_seen_ago:.1f}'
+            )
+
+        #  forwarded per-node metrics (optional — only if present) 
+
+        forwarded = {
+            "fairness_score":   ("huddle_node_fairness_score",
+                                 "Per-node load-balancing fairness score (0-1)", "gauge"),
+            "inner_servers":    ("huddle_node_inner_servers",
+                                 "Backend servers currently in the inner (active) ring", "gauge"),
+            "outer_servers":    ("huddle_node_outer_servers",
+                                 "Backend servers currently in the outer (cooled-down) ring", "gauge"),
+            "rotation_count":   ("huddle_node_rotation_count",
+                                 "Total inner/outer ring rotations on this node", "counter"),
+            "requests_per_sec": ("huddle_node_requests_per_sec",
+                                 "Current request rate reported by this node", "gauge"),
+        }
+        for field, (metric_name, help_text, mtype) in forwarded.items():
+            node_values = [
+                (n.node_id, n.metrics[field]) for n in nodes
+                if isinstance(n.metrics, dict) and field in n.metrics
+            ]
+            if not node_values:
+                continue
+            lines += [
+                "",
+                f"# HELP {metric_name} {help_text}",
+                f"# TYPE {metric_name} {mtype}",
+            ]
+            for node_id, value in node_values:
+                lines.append(f'{metric_name}{{node_id="{node_id}"}} {value}')
+
+        return "\n".join(lines) + "\n"
 
     
     # Internal — HTTP server
@@ -259,6 +384,14 @@ class MasterNode:
                 self.end_headers()
                 self.wfile.write(data)
 
+            def _send_text(self, code: int, body: str, content_type: str) -> None:
+                data = body.encode()
+                self.send_response(code)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
             def _read_json(self) -> Optional[Dict]:
                 length = int(self.headers.get("Content-Length", 0))
                 if not length:
@@ -278,6 +411,10 @@ class MasterNode:
 
                 elif path == f"{_API_V1}/status":
                     self._send_json(200, master.status())
+
+                elif path == f"{_API_V1}/metrics":
+                    self._send_text(200, master.prometheus_metrics(),
+                                     "text/plain; version=0.0.4; charset=utf-8")
 
                 elif path == f"{_API_V1}/nodes":
                     self._send_json(200, {"nodes": master.nodes()})
@@ -355,6 +492,7 @@ class MasterNode:
             time.sleep(check_every)
             if self._running:
                 self._check_heartbeats()
+                self._check_cluster_health()
 
     def _check_heartbeats(self) -> None:
         now = time.time()
@@ -410,6 +548,67 @@ class MasterNode:
         cutoff = now - self._flap_window
         node.recent_deaths = [t for t in node.recent_deaths if t >= cutoff]
         node.consecutive_alive_heartbeats = 0
+
+    def _check_cluster_health(self) -> None:
+        """
+        Fire on_cluster_unhealthy / on_cluster_recovered based on the
+        fraction of nodes currently alive, if unhealthy_alive_ratio is set.
+        An empty cluster (no nodes registered yet) is never considered
+        unhealthy — there's nothing to be unhealthy about.
+        """
+        if self._unhealthy_alive_ratio is None:
+            return
+
+        with self._lock:
+            total = len(self._nodes)
+            if total == 0:
+                return
+            alive = sum(1 for n in self._nodes.values() if n.status == "alive")
+
+        ratio = alive / total
+        is_unhealthy = ratio < self._unhealthy_alive_ratio
+
+        fire_unhealthy = False
+        fire_recovered = False
+        if is_unhealthy and not self._cluster_unhealthy:
+            self._cluster_unhealthy = True
+            fire_unhealthy = True
+        elif not is_unhealthy and self._cluster_unhealthy:
+            self._cluster_unhealthy = False
+            fire_recovered = True
+
+        if not (fire_unhealthy or fire_recovered):
+            return
+
+        snapshot = {
+            "total_nodes": total,
+            "alive_nodes": alive,
+            "alive_ratio": round(ratio, 3),
+            "threshold": self._unhealthy_alive_ratio,
+        }
+
+        if fire_unhealthy:
+            logger.warning(
+                "Cluster health degraded: %.0f%% alive (%d/%d) — below "
+                "threshold %.0f%%",
+                ratio * 100, alive, total, self._unhealthy_alive_ratio * 100,
+            )
+            if self._on_cluster_unhealthy:
+                try:
+                    self._on_cluster_unhealthy(snapshot)
+                except Exception:
+                    logger.exception("on_cluster_unhealthy callback raised")
+
+        if fire_recovered:
+            logger.info(
+                "Cluster health recovered: %.0f%% alive (%d/%d)",
+                ratio * 100, alive, total,
+            )
+            if self._on_cluster_recovered:
+                try:
+                    self._on_cluster_recovered(snapshot)
+                except Exception:
+                    logger.exception("on_cluster_recovered callback raised")
 
     
     # Internal — request handlers
@@ -575,6 +774,7 @@ class MasterNode:
 
     
     # Repr
+    
 
     def __repr__(self) -> str:
         return (

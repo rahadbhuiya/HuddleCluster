@@ -19,9 +19,10 @@ Commands
 
     huddle-cluster cluster status [--master URL]
     huddle-cluster cluster health [--master URL]
+    huddle-cluster cluster metrics [--master URL]
 
 Author : Rahad Bhuiya
-Version: 2.1.0
+Version: 2.2.0
 License: MIT
 """
 
@@ -48,6 +49,21 @@ def _get(master_url: str, path: str) -> Dict[str, Any]:
     try:
         with urllib.request.urlopen(url, timeout=5.0) as resp:
             return json.loads(resp.read())
+    except urllib.error.URLError as exc:
+        print(f"\n[error] Cannot reach master at {master_url}")
+        print(f"        {exc.reason}")
+        print("        Is the master running?  huddle-cluster master start")
+        sys.exit(1)
+    except Exception as exc:
+        print(f"\n[error] {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _get_text(master_url: str, path: str) -> str:
+    url = f"{master_url.rstrip('/')}{path}"
+    try:
+        with urllib.request.urlopen(url, timeout=5.0) as resp:
+            return resp.read().decode()
     except urllib.error.URLError as exc:
         print(f"\n[error] Cannot reach master at {master_url}")
         print(f"        {exc.reason}")
@@ -221,6 +237,11 @@ def cmd_cluster_health(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_cluster_metrics(args: argparse.Namespace) -> None:
+    text = _get_text(args.master, f"{_API_V1}/metrics")
+    print(text, end="")
+
+
 
 # Argument parser
 
@@ -316,6 +337,11 @@ def build_parser() -> argparse.ArgumentParser:
     ch.add_argument("--master", default=_DEFAULT_MASTER,
                     help=f"Master URL  (default: {_DEFAULT_MASTER})")
     ch.set_defaults(func=cmd_cluster_health)
+
+    cm = cluster_s.add_parser("metrics", help="Print Prometheus text exposition")
+    cm.add_argument("--master", default=_DEFAULT_MASTER,
+                    help=f"Master URL  (default: {_DEFAULT_MASTER})")
+    cm.set_defaults(func=cmd_cluster_metrics)
 
     return parser
 

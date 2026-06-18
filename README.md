@@ -1,16 +1,16 @@
 # HuddleCluster
 
 <p align="center">
-  <img src="assets/logo.svg" width="400" alt="HuddleCluster logo"/>
+  <img src="https://raw.githubusercontent.com/rahadbhuiya/HuddleCluster/main/assets/logo.svg" width="400" alt="HuddleCluster logo"/>
 </p>
 
 
 
 A penguin-inspired, self-organizing server load balancer with adaptive thermal eviction.
 
-**Author:** Rahad Bhuiya
-**Version:** 2.1.0
-**License:** MIT
+**Author:** Rahad Bhuiya <br>
+**Version:** 2.2.0 <br>
+**License:** MIT <br>
 **Paper:** [HuddleCluster: A Penguin-Inspired Self-Organizing Load Balancer with Adaptive Thermal Eviction](https://github.com/rahadbhuiya/HuddleCluster/blob/main/docs/HuddleCluster.pdf)
 
 ---
@@ -443,6 +443,7 @@ agent.start()
 |---|---|---|
 | `GET` | `/v1/health` | `{"status": "ok"}` |
 | `GET` | `/v1/status` | Cluster summary (node counts, uptime) |
+| `GET` | `/v1/metrics` | Prometheus text exposition (cluster-wide) |
 | `GET` | `/v1/nodes` | List all nodes |
 | `GET` | `/v1/nodes/{id}` | Single node record |
 | `POST` | `/v1/nodes/join` | Agent enrollment |
@@ -478,6 +479,46 @@ heartbeat or via re-joining (a crash-looping agent is caught either way).
 Purge is disabled by default — set `purge_after_sec` explicitly to opt in,
 and keep it larger than `heartbeat_timeout_sec` (the master logs a warning
 otherwise).
+
+### Metrics & Monitoring (Level 2)
+
+The master exposes a single Prometheus scrape target for the whole cluster
+— no need to discover and poll every agent individually:
+
+```bash
+curl http://localhost:7070/v1/metrics
+# or
+huddle-cluster cluster metrics
+```
+
+```
+huddle_master_total_nodes 3
+huddle_master_alive_nodes 2
+huddle_master_quarantined_nodes 1
+huddle_node_up{node_id="web-01"} 1
+huddle_node_fairness_score{node_id="web-01"} 0.94
+```
+
+Per-node metrics that an agent actually forwards (e.g. `fairness_score`,
+`inner_servers`, from an attached HuddleCluster's own `health_report()`)
+only appear when present — a node that never reports a field is absent
+from that metric family rather than shown as zero.
+
+For threshold-based alerting on the cluster as a whole (separate from
+per-node dead/quarantine events), set `unhealthy_alive_ratio`:
+
+```python
+master = MasterNode(
+    port=7070,
+    unhealthy_alive_ratio=0.5,   # alert if under 50% of nodes are alive
+    on_cluster_unhealthy=lambda s: page_oncall(s),
+    on_cluster_recovered=lambda s: print("cluster back to healthy"),
+)
+```
+
+Each callback fires once per transition (not on every monitor tick), and
+the current state is visible via `status()["cluster_unhealthy"]` or the
+`huddle_master_unhealthy` gauge in `/v1/metrics`.
 
 ### Behaviour Highlights
 
@@ -525,7 +566,7 @@ HuddleCluster/
 |   |   |-- nginx_lc.conf          # NGINX least-connections config
 |   |-- run_http_benchmark.bat     # Windows one-click runner
 |
-|-- tests/                         # 498 tests across 19 modules
+|-- tests/                         # 514 tests across 19 modules
 |   |-- test_rotation.py           # Rotation, eviction, feedback loop
 |   |-- test_fairness.py           # Fairness and Gini tests
 |   |-- test_stress.py             # Concurrent load tests
@@ -543,7 +584,7 @@ HuddleCluster/
 |   |-- test_redis_backend.py      # Redis backend tests (uses fakeredis mock)
 |   |-- test_grpc_cluster.py       # gRPC cluster tests (uses grpc mock)
 |   |-- test_k8s_discovery.py      # K8s discovery tests (uses k8s mock)
-|   |-- test_cluster_master.py     # MasterNode tests — 45 tests (v2.0.0)
+|   |-- test_cluster_master.py     # MasterNode tests — 61 tests (v2.0.0)
 |   |-- test_cluster_agent.py      # AgentNode tests  — 26 tests (v2.0.0)
 |   |-- conftest.py                # Shared fixtures
 |
@@ -778,12 +819,12 @@ Setup PyPI Trusted Publishing:
 - [x] Node list with status, metrics, last-seen-ago — v2.0.0
 - [x] `huddle-cluster` CLI (master start, agent start, nodes list, cluster status) — v2.0.0
 
-**Level 2 — Production Ready (planned)**
-- [x] Auto recovery — flapping detection (quarantine) and stale-node purge — v2.0.0
+**Level 2 — Production Ready (in progress, 3/6)**
+- [x] Auto recovery — flapping detection (quarantine) and stale-node purge — v2.1.0
 - [ ] Web dashboard — real-time cluster topology view
 - [ ] RBAC / authentication — API key and role-based access
-- [ ] Monitoring — Prometheus metrics from master
-- [ ] Structured metrics aggregation — per-node and cluster-wide stats
+- [x] Monitoring — `unhealthy_alive_ratio` threshold + on_cluster_unhealthy/recovered — v2.2.0
+- [x] Metrics — `GET /v1/metrics` Prometheus exposition, per-node + cluster-wide — v2.2.0
 - [ ] REST API — full OpenAPI spec with versioning
 
 **Level 3 — Kubernetes / Swarm-grade (planned)**

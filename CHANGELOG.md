@@ -5,6 +5,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.2.0] - 2026-06-18
+
+### Added — Level 2: Production Ready (in progress, 3/6)
+
+**Metrics** (`huddle_cluster_pkg.cluster_master`)
+- New `GET /v1/metrics` endpoint: Prometheus text exposition format
+  (`text/plain; version=0.0.4`), aggregating the whole cluster from one
+  scrape target instead of needing to discover and poll every agent
+- Master-level gauges: `huddle_master_uptime_seconds`, `_total_nodes`,
+  `_alive_nodes`, `_dead_nodes`, `_quarantined_nodes`, `_unhealthy`
+- Per-node gauges/counters labeled by `node_id`: `huddle_node_up` (1=alive,
+  0.5=quarantined, 0=dead), `_heartbeat_count`, `_death_count`,
+  `_last_seen_seconds`
+- Forwarded per-node metrics (only emitted when a node actually reports
+  them via heartbeat, so missing data reads as absent, not zero):
+  `huddle_node_fairness_score`, `_inner_servers`, `_outer_servers`,
+  `_rotation_count`, `_requests_per_sec`
+- New `MasterNode.prometheus_metrics()` method (same pattern as the
+  existing single-instance `HuddleCluster.prometheus_metrics()`)
+- CLI: `huddle-cluster cluster metrics [--master]`
+
+**Monitoring** (`huddle_cluster_pkg.cluster_master`)
+- New `unhealthy_alive_ratio` option: fires `on_cluster_unhealthy` when the
+  fraction of `alive` nodes drops below the configured ratio, and
+  `on_cluster_recovered` when it recovers above it
+- Disabled by default (opt-in); an empty cluster (no nodes registered yet)
+  is never considered unhealthy
+- `status()` now reports `cluster_unhealthy` and `unhealthy_alive_ratio`;
+  also exposed as the `huddle_master_unhealthy` Prometheus gauge
+- Each transition fires its callback exactly once (no repeat firing while
+  the cluster stays in the same health state)
+
+**Tests**
+- 16 new tests (`TestPrometheusMetrics`, `TestClusterHealthMonitoring`) —
+  61 total in `tests/test_cluster_master.py`
+
+---
+
 ## [2.1.0] - 2026-06-17
 
 ### Added — Level 2: Production Ready (in progress, 1/6)
