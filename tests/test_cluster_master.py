@@ -25,19 +25,25 @@ def _free_port():
     return p
 
 
-def _get(port, path):
+def _get(port, path, api_key=None):
     url = f"http://127.0.0.1:{port}/v1{path}"
-    with urllib.request.urlopen(url, timeout=3) as r:
+    req = urllib.request.Request(url)
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+    with urllib.request.urlopen(req, timeout=3) as r:
         return json.loads(r.read())
 
 
-def _get_text(port, path):
+def _get_text(port, path, api_key=None):
     url = f"http://127.0.0.1:{port}/v1{path}"
-    with urllib.request.urlopen(url, timeout=3) as r:
+    req = urllib.request.Request(url)
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+    with urllib.request.urlopen(req, timeout=3) as r:
         return r.read().decode()
 
 
-def _post(port, path, payload):
+def _post(port, path, payload, api_key=None):
     """POST and return the JSON body regardless of HTTP status code."""
     data = json.dumps(payload).encode()
     req  = urllib.request.Request(
@@ -46,6 +52,8 @@ def _post(port, path, payload):
     )
     req.add_header("Content-Type",   "application/json")
     req.add_header("Content-Length", str(len(data)))
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
     try:
         with urllib.request.urlopen(req, timeout=3) as r:
             return json.loads(r.read())
@@ -54,12 +62,14 @@ def _post(port, path, payload):
         return json.loads(e.read())
 
 
-def _delete(port, path):
+def _delete(port, path, api_key=None):
     """DELETE and return the JSON body regardless of HTTP status code."""
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/v1{path}",
         method="DELETE",
     )
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
     try:
         with urllib.request.urlopen(req, timeout=3) as r:
             return json.loads(r.read())
@@ -79,6 +89,7 @@ def master():
     time.sleep(0.1)
     yield m
     m.stop()
+
 
 
 # Tests
@@ -923,5 +934,166 @@ class TestClusterHealthMonitoring:
             time.sleep(0.6)
             text = _get_text(port, "/metrics")
             assert "huddle_master_unhealthy 1" in text
+        finally:
+            m.stop()
+
+
+class TestAuthentication:
+    """RBAC: api_keys=None means open (default); when set, requires
+    Authorization: Bearer <key>, with 'admin' or 'viewer' role checks."""
+
+    def _make_master(self, api_keys):
+        port = _free_port()
+        m = MasterNode(host="127.0.0.1", port=port, heartbeat_timeout_sec=60,
+                        api_keys=api_keys)
+        m.start()
+        time.sleep(0.1)
+        return m
+
+    def test_open_by_default(self, master):
+        """No api_keys configured -> every request succeeds with no header."""
+        resp = _post(master.port, "/nodes/join", {
+            "node_id": "auth0", "address": "127.0.0.1", "port": 9600,
+        })
+        assert resp["ok"] is True
+        status = _get(master.port, "/status")
+        assert "total_nodes" in status
+
+    def test_missing_header_rejected(self):
+        m = self._make_master({"secret-admin": "admin"})
+        try:
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                _get(m.port, "/status")
+            assert exc.value.code == 401
+        finally:
+            m.stop()
+
+    def test_invalid_key_rejected(self):
+        m = self._make_master({"secret-admin": "admin"})
+        try:
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                _get(m.port, "/status", api_key="wrong-key")
+            assert exc.value.code == 401
+        finally:
+            m.stop()
+
+    def test_health_never_requires_auth(self):
+        m = self._make_master({"secret-admin": "admin"})
+        try:
+            resp = _get(m.port, "/health")   # no api_key passed
+            assert resp["status"] == "ok"
+        finally:
+            m.stop()
+
+    def test_viewer_can_read(self):
+        m = self._make_master({"view-key": "viewer"})
+        try:
+            status = _get(m.port, "/status", api_key="view-key")
+            assert "total_nodes" in status
+            nodes = _get(m.port, "/nodes", api_key="view-key")
+            assert "nodes" in nodes
+            text = _get_text(m.port, "/metrics", api_key="view-key")
+            assert "huddle_master_total_nodes" in text
+        finally:
+            m.stop()
+
+    def test_viewer_cannot_join(self):
+        m = self._make_master({"view-key": "viewer"})
+        try:
+            resp = _post(m.port, "/nodes/join", {
+                "node_id": "auth1", "address": "127.0.0.1", "port": 9601,
+            }, api_key="view-key")
+            assert resp["ok"] is False
+            assert "permission" in resp.get("error", "")
+        finally:
+            m.stop()
+
+    def test_viewer_cannot_heartbeat(self):
+        m = self._make_master({"admin-key": "admin", "view-key": "viewer"})
+        try:
+            _post(m.port, "/nodes/join", {
+                "node_id": "auth2", "address": "127.0.0.1", "port": 9602,
+            }, api_key="admin-key")
+            resp = _post(m.port, "/nodes/auth2/heartbeat", {}, api_key="view-key")
+            assert resp["ok"] is False
+            assert "permission" in resp.get("error", "")
+        finally:
+            m.stop()
+
+    def test_viewer_cannot_delete(self):
+        m = self._make_master({"admin-key": "admin", "view-key": "viewer"})
+        try:
+            _post(m.port, "/nodes/join", {
+                "node_id": "auth3", "address": "127.0.0.1", "port": 9603,
+            }, api_key="admin-key")
+            resp = _delete(m.port, "/nodes/auth3", api_key="view-key")
+            assert resp["ok"] is False
+            assert "permission" in resp.get("error", "")
+            # Confirm the node was NOT actually removed by the rejected attempt
+            node = _get(m.port, "/nodes/auth3", api_key="admin-key")
+            assert node["node_id"] == "auth3"
+        finally:
+            m.stop()
+
+    def test_admin_can_do_everything(self):
+        m = self._make_master({"admin-key": "admin"})
+        try:
+            r1 = _post(m.port, "/nodes/join", {
+                "node_id": "auth4", "address": "127.0.0.1", "port": 9604,
+            }, api_key="admin-key")
+            assert r1["ok"] is True
+
+            r2 = _post(m.port, "/nodes/auth4/heartbeat", {}, api_key="admin-key")
+            assert r2["ok"] is True
+
+            status = _get(m.port, "/status", api_key="admin-key")
+            assert status["total_nodes"] == 1
+
+            r3 = _delete(m.port, "/nodes/auth4", api_key="admin-key")
+            assert r3["ok"] is True
+        finally:
+            m.stop()
+
+    def test_malformed_auth_header_rejected(self):
+        m = self._make_master({"secret-admin": "admin"})
+        try:
+            url = f"http://127.0.0.1:{m.port}/v1/status"
+            req = urllib.request.Request(url)
+            req.add_header("Authorization", "Basic notabearertoken")
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                urllib.request.urlopen(req, timeout=3)
+            assert exc.value.code == 401
+        finally:
+            m.stop()
+
+    def test_unrecognized_role_has_no_access(self):
+        """A key mapped to a typo'd/unknown role fails closed, not open."""
+        m = self._make_master({"odd-key": "superadmin"})
+        try:
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                _get(m.port, "/status", api_key="odd-key")
+            assert exc.value.code == 403
+        finally:
+            m.stop()
+
+    def test_multiple_admin_keys_all_work(self):
+        m = self._make_master({"key-a": "admin", "key-b": "admin"})
+        try:
+            r1 = _get(m.port, "/status", api_key="key-a")
+            r2 = _get(m.port, "/status", api_key="key-b")
+            assert "total_nodes" in r1
+            assert "total_nodes" in r2
+        finally:
+            m.stop()
+
+    def test_node_detail_requires_auth(self):
+        m = self._make_master({"admin-key": "admin"})
+        try:
+            _post(m.port, "/nodes/join", {
+                "node_id": "auth5", "address": "127.0.0.1", "port": 9605,
+            }, api_key="admin-key")
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                _get(m.port, "/nodes/auth5")   # no key
+            assert exc.value.code == 401
         finally:
             m.stop()

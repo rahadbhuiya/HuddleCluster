@@ -11,7 +11,7 @@ deployment.  It does NOT route traffic itself; instead it:
   - Exposes a REST API consumed by the CLI and external tooling
 
 Author : Rahad Bhuiya
-Version: 2.2.0
+Version: 2.3.0
 License: MIT
 """
 
@@ -35,9 +35,18 @@ DEFAULT_FLAP_THRESHOLD: int = 3           # deaths within window that triggers q
 DEFAULT_QUARANTINE_RECOVERY: int = 3      # consecutive heartbeats needed to exit quarantine
 _API_V1 = "/v1"
 
+# RBAC: higher rank can do everything a lower rank can. Unrecognized role
+# strings rank 0 (no access) so a typo'd role fails closed, not open.
+_ROLE_RANK: Dict[str, int] = {"viewer": 1, "admin": 2}
+
+
+def _role_satisfies(role: str, required: str) -> bool:
+    return _ROLE_RANK.get(role, 0) >= _ROLE_RANK.get(required, 99)
+
 
 
 # NodeRecord
+
 
 @dataclass
 class NodeRecord:
@@ -104,6 +113,13 @@ class MasterNode:
         consecutive heartbeats, then promoted back to ``alive`` with a clean
         slate. Nodes dead longer than ``purge_after_sec`` (if set) are removed
         from the registry entirely.
+
+    Authentication / RBAC:
+        Pass ``api_keys={"<key>": "admin"|"viewer", ...}`` to require a
+        ``Authorization: Bearer <key>`` header on every request except
+        ``GET /v1/health``. ``viewer`` keys may only use GET endpoints;
+        ``admin`` keys may also join/heartbeat/leave. Omitting ``api_keys``
+        (the default) leaves the API open, exactly as before this existed.
     """
 
     def __init__(
@@ -116,6 +132,7 @@ class MasterNode:
         quarantine_recovery_heartbeats: int = DEFAULT_QUARANTINE_RECOVERY,
         purge_after_sec: Optional[float] = None,
         unhealthy_alive_ratio: Optional[float] = None,
+        api_keys: Optional[Dict[str, str]] = None,
         on_node_join: Optional[Callable[[NodeRecord], None]] = None,
         on_node_leave: Optional[Callable[[NodeRecord], None]] = None,
         on_node_dead: Optional[Callable[[NodeRecord], None]] = None,
@@ -143,6 +160,17 @@ class MasterNode:
 
         self._unhealthy_alive_ratio = unhealthy_alive_ratio
         self._cluster_unhealthy = False
+
+        self._api_keys = api_keys
+        if api_keys:
+            for key, role in api_keys.items():
+                if role not in _ROLE_RANK:
+                    logger.warning(
+                        "API key ending in '...%s' has unrecognized role "
+                        "'%s' (expected 'admin' or 'viewer') — it will be "
+                        "treated as having no access",
+                        key[-4:] if len(key) >= 4 else key, role,
+                    )
 
         self._nodes: Dict[str, NodeRecord] = {}
         self._lock = threading.RLock()
@@ -401,25 +429,72 @@ class MasterNode:
                 except (json.JSONDecodeError, ValueError):
                     return None
 
+            def _check_auth(self, required_role: str) -> bool:
+                """
+                Returns True if the request is authorized to proceed.
+                If not, sends the 401/403 response itself and returns False.
+                When master._api_keys is None, auth is disabled entirely
+                and this always returns True (open API, same as before
+                RBAC existed).
+                """
+                if master._api_keys is None:
+                    return True
+
+                header = self.headers.get("Authorization", "")
+                if not header.startswith("Bearer "):
+                    self._send_json(401, {
+                        "ok": False,
+                        "error": "missing Authorization header (expected 'Bearer <api_key>')"
+                    })
+                    return False
+
+                key  = header[len("Bearer "):].strip()
+                role = master._api_keys.get(key)
+                if role is None:
+                    logger.warning("Rejected request: invalid API key")
+                    self._send_json(401, {"ok": False, "error": "invalid API key"})
+                    return False
+
+                if not _role_satisfies(role, required_role):
+                    logger.warning(
+                        "Rejected request: role '%s' lacks '%s' permission",
+                        role, required_role,
+                    )
+                    self._send_json(403, {
+                        "ok": False,
+                        "error": f"role '{role}' lacks required '{required_role}' permission"
+                    })
+                    return False
+
+                return True
+
             #  GET 
 
             def do_GET(self) -> None:
                 path = self.path.split("?")[0]
 
                 if path == f"{_API_V1}/health":
-                    self._send_json(200, {"status": "ok"})
+                    self._send_json(200, {"status": "ok"})   # never requires auth
 
                 elif path == f"{_API_V1}/status":
+                    if not self._check_auth("viewer"):
+                        return
                     self._send_json(200, master.status())
 
                 elif path == f"{_API_V1}/metrics":
+                    if not self._check_auth("viewer"):
+                        return
                     self._send_text(200, master.prometheus_metrics(),
                                      "text/plain; version=0.0.4; charset=utf-8")
 
                 elif path == f"{_API_V1}/nodes":
+                    if not self._check_auth("viewer"):
+                        return
                     self._send_json(200, {"nodes": master.nodes()})
 
                 elif re.match(rf"{_API_V1}/nodes/([^/]+)$", path):
+                    if not self._check_auth("viewer"):
+                        return
                     node_id = path.rsplit("/", 1)[-1]
                     with master._lock:
                         node = master._nodes.get(node_id)
@@ -427,31 +502,39 @@ class MasterNode:
                         self._send_json(200, node.to_dict())
                     else:
                         self._send_json(404,
-                            {"error": f"node '{node_id}' not found"})
+                            {"ok": False, "error": f"node '{node_id}' not found"})
                 else:
-                    self._send_json(404, {"error": "not found"})
+                    self._send_json(404, {"ok": False, "error": "not found"})
 
             #  POST 
 
             def do_POST(self) -> None:
                 path = self.path.split("?")[0]
-                body = self._read_json()
-                if body is None:
-                    self._send_json(400, {"error": "invalid JSON"})
-                    return
 
                 if path == f"{_API_V1}/nodes/join":
+                    if not self._check_auth("admin"):
+                        return
+                    body = self._read_json()
+                    if body is None:
+                        self._send_json(400, {"ok": False, "error": "invalid JSON"})
+                        return
                     result = master._handle_join(body)
                     self._send_json(200 if result.get("ok") else 400, result)
 
                 elif re.match(rf"{_API_V1}/nodes/([^/]+)/heartbeat$", path):
+                    if not self._check_auth("admin"):
+                        return
+                    body = self._read_json()
+                    if body is None:
+                        self._send_json(400, {"ok": False, "error": "invalid JSON"})
+                        return
                     parts = path.rsplit("/", 2)
                     node_id = parts[-2]
                     result = master._handle_heartbeat(node_id, body)
                     self._send_json(200 if result.get("ok") else 404, result)
 
                 else:
-                    self._send_json(404, {"error": "not found"})
+                    self._send_json(404, {"ok": False, "error": "not found"})
 
             #  DELETE 
 
@@ -459,11 +542,13 @@ class MasterNode:
                 path = self.path.split("?")[0]
                 m = re.match(rf"{_API_V1}/nodes/([^/]+)$", path)
                 if m:
+                    if not self._check_auth("admin"):
+                        return
                     node_id = m.group(1)
                     result = master._handle_leave(node_id)
                     self._send_json(200 if result.get("ok") else 404, result)
                 else:
-                    self._send_json(404, {"error": "not found"})
+                    self._send_json(404, {"ok": False, "error": "not found"})
 
         self._http = http.server.HTTPServer((self._host, self._port), _Handler)
         self._http.allow_reuse_address = True

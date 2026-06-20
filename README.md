@@ -9,7 +9,7 @@
 A penguin-inspired, self-organizing server load balancer with adaptive thermal eviction.
 
 **Author:** Rahad Bhuiya <br>
-**Version:** 2.2.0 <br>
+**Version:** 2.3.0 <br>
 **License:** MIT <br>
 **Paper:** [HuddleCluster: A Penguin-Inspired Self-Organizing Load Balancer with Adaptive Thermal Eviction](https://github.com/rahadbhuiya/HuddleCluster/blob/main/docs/HuddleCluster.pdf)
 
@@ -450,6 +450,50 @@ agent.start()
 | `POST` | `/v1/nodes/{id}/heartbeat` | Heartbeat + metrics |
 | `DELETE` | `/v1/nodes/{id}` | Graceful departure |
 
+### Authentication & RBAC (Level 2)
+
+By default the master's API is open — no credentials needed, same as
+before this existed. To lock it down, pass `api_keys`:
+
+```python
+from huddle_cluster_pkg import MasterNode
+
+master = MasterNode(
+    port=7070,
+    api_keys={
+        "admin-secret-key":   "admin",    # can join/heartbeat/leave + read
+        "dashboard-view-key": "viewer",   # read-only: status/metrics/nodes
+    },
+)
+master.start()
+```
+
+```bash
+huddle-cluster master start --api-key admin-secret-key=admin --api-key dashboard-view-key=viewer
+```
+
+Every request then needs `Authorization: Bearer <key>` — except
+`GET /v1/health`, which is deliberately exempt so liveness probes don't
+need credentials. Agents authenticate the same way:
+
+```python
+agent = AgentNode(
+    node_id="web-01", master_url="http://master:7070", port=8080,
+    api_key="admin-secret-key",   # agents need an admin-role key
+)
+```
+
+```bash
+huddle-cluster agent start --id web-01 --master http://master:7070 --port 8080 --api-key admin-secret-key
+```
+
+The CLI's read commands (`nodes list`, `nodes status`, `cluster status`,
+`cluster metrics`) accept `--api-key` too. A missing/invalid key gets
+`401`; a valid key without enough permission (e.g. a viewer trying to
+join) gets `403` — both logged on the master side for visibility. An
+unrecognized role string is treated as no access rather than full access,
+so a typo in configuration fails closed.
+
 ### Auto Recovery (Level 2)
 
 A node that dies and recovers repeatedly within a short window is not
@@ -566,7 +610,7 @@ HuddleCluster/
 |   |   |-- nginx_lc.conf          # NGINX least-connections config
 |   |-- run_http_benchmark.bat     # Windows one-click runner
 |
-|-- tests/                         # 514 tests across 19 modules
+|-- tests/                         # 533 tests across 19 modules
 |   |-- test_rotation.py           # Rotation, eviction, feedback loop
 |   |-- test_fairness.py           # Fairness and Gini tests
 |   |-- test_stress.py             # Concurrent load tests
@@ -584,8 +628,8 @@ HuddleCluster/
 |   |-- test_redis_backend.py      # Redis backend tests (uses fakeredis mock)
 |   |-- test_grpc_cluster.py       # gRPC cluster tests (uses grpc mock)
 |   |-- test_k8s_discovery.py      # K8s discovery tests (uses k8s mock)
-|   |-- test_cluster_master.py     # MasterNode tests — 61 tests (v2.0.0)
-|   |-- test_cluster_agent.py      # AgentNode tests  — 26 tests (v2.0.0)
+|   |-- test_cluster_master.py     # MasterNode tests — 74 tests (v2.0.0)
+|   |-- test_cluster_agent.py      # AgentNode tests  — 32 tests (v2.0.0)
 |   |-- conftest.py                # Shared fixtures
 |
 |-- examples/
@@ -819,10 +863,10 @@ Setup PyPI Trusted Publishing:
 - [x] Node list with status, metrics, last-seen-ago — v2.0.0
 - [x] `huddle-cluster` CLI (master start, agent start, nodes list, cluster status) — v2.0.0
 
-**Level 2 — Production Ready (in progress, 3/6)**
+**Level 2 — Production Ready (in progress, 4/6)**
 - [x] Auto recovery — flapping detection (quarantine) and stale-node purge — v2.1.0
 - [ ] Web dashboard — real-time cluster topology view
-- [ ] RBAC / authentication — API key and role-based access
+- [x] RBAC / authentication — API key with admin/viewer roles — v2.3.0
 - [x] Monitoring — `unhealthy_alive_ratio` threshold + on_cluster_unhealthy/recovered — v2.2.0
 - [x] Metrics — `GET /v1/metrics` Prometheus exposition, per-node + cluster-wide — v2.2.0
 - [ ] REST API — full OpenAPI spec with versioning

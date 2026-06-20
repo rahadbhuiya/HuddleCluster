@@ -26,9 +26,12 @@ def _free_port():
     return p
 
 
-def _get(port, path):
+def _get(port, path, api_key=None):
     url = f"http://127.0.0.1:{port}/v1{path}"
-    with urllib.request.urlopen(url, timeout=3) as r:
+    req = urllib.request.Request(url)
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+    with urllib.request.urlopen(req, timeout=3) as r:
         return json.loads(r.read())
 
 
@@ -468,6 +471,8 @@ class TestAgentCallbacks:
 
 
 # Tests — multiple agents
+
+
 class TestMultipleAgents:
     def test_three_agents_all_registered(self, master):
         agents = [
@@ -517,3 +522,150 @@ class TestMultipleAgents:
         finally:
             agents[0].stop()
             agents[2].stop()
+
+
+class TestAgentApiKey:
+    """AgentNode forwards api_key as 'Authorization: Bearer <key>' on every
+    join/heartbeat/leave call, so it can talk to a master with RBAC enabled."""
+
+    def test_agent_joins_master_requiring_auth(self):
+        port = _free_port()
+        m = MasterNode(host="127.0.0.1", port=port, heartbeat_timeout_sec=60,
+                        api_keys={"agent-secret": "admin"})
+        m.start()
+        time.sleep(0.1)
+        try:
+            agent = AgentNode(
+                node_id="auth-a1",
+                master_url=f"http://127.0.0.1:{port}",
+                port=8300,
+                address="127.0.0.1",
+                api_key="agent-secret",
+            )
+            agent.start()
+            time.sleep(0.2)
+            try:
+                assert agent.joined is True
+                nodes = _get(port, "/nodes", api_key="agent-secret")["nodes"]
+                assert any(n["node_id"] == "auth-a1" for n in nodes)
+            finally:
+                agent.stop()
+        finally:
+            m.stop()
+
+    def test_agent_fails_without_key_when_master_requires_auth(self):
+        port = _free_port()
+        m = MasterNode(host="127.0.0.1", port=port, heartbeat_timeout_sec=60,
+                        api_keys={"agent-secret": "admin"})
+        m.start()
+        time.sleep(0.1)
+        try:
+            agent = AgentNode(
+                node_id="auth-a2",
+                master_url=f"http://127.0.0.1:{port}",
+                port=8301,
+                address="127.0.0.1",
+                # no api_key set
+            )
+            agent.start(retry=1)
+            time.sleep(0.2)
+            try:
+                assert agent.joined is False
+            finally:
+                agent.stop()
+        finally:
+            m.stop()
+
+    def test_agent_fails_with_wrong_key(self):
+        port = _free_port()
+        m = MasterNode(host="127.0.0.1", port=port, heartbeat_timeout_sec=60,
+                        api_keys={"agent-secret": "admin"})
+        m.start()
+        time.sleep(0.1)
+        try:
+            agent = AgentNode(
+                node_id="auth-a3",
+                master_url=f"http://127.0.0.1:{port}",
+                port=8302,
+                address="127.0.0.1",
+                api_key="totally-wrong-key",
+            )
+            agent.start(retry=1)
+            time.sleep(0.2)
+            try:
+                assert agent.joined is False
+            finally:
+                agent.stop()
+        finally:
+            m.stop()
+
+    def test_agent_heartbeats_succeed_with_key(self):
+        port = _free_port()
+        m = MasterNode(host="127.0.0.1", port=port, heartbeat_timeout_sec=60,
+                        api_keys={"agent-secret": "admin"})
+        m.start()
+        time.sleep(0.1)
+        try:
+            agent = AgentNode(
+                node_id="auth-a4",
+                master_url=f"http://127.0.0.1:{port}",
+                port=8303,
+                address="127.0.0.1",
+                api_key="agent-secret",
+                heartbeat_interval_sec=0.3,
+            )
+            agent.start()
+            time.sleep(1.0)
+            try:
+                assert agent.heartbeat_count >= 2
+            finally:
+                agent.stop()
+        finally:
+            m.stop()
+
+    def test_agent_leave_succeeds_with_key(self):
+        port = _free_port()
+        m = MasterNode(host="127.0.0.1", port=port, heartbeat_timeout_sec=60,
+                        api_keys={"agent-secret": "admin"})
+        m.start()
+        time.sleep(0.1)
+        try:
+            agent = AgentNode(
+                node_id="auth-a5",
+                master_url=f"http://127.0.0.1:{port}",
+                port=8304,
+                address="127.0.0.1",
+                api_key="agent-secret",
+            )
+            agent.start()
+            time.sleep(0.2)
+            agent.stop()
+            time.sleep(0.1)
+            nodes = _get(port, "/nodes", api_key="agent-secret")["nodes"]
+            assert all(n["node_id"] != "auth-a5" for n in nodes)
+        finally:
+            m.stop()
+
+    def test_viewer_key_cannot_be_used_by_agent(self):
+        """An agent given a viewer-role key should fail to join (403, not joined)."""
+        port = _free_port()
+        m = MasterNode(host="127.0.0.1", port=port, heartbeat_timeout_sec=60,
+                        api_keys={"readonly-key": "viewer"})
+        m.start()
+        time.sleep(0.1)
+        try:
+            agent = AgentNode(
+                node_id="auth-a6",
+                master_url=f"http://127.0.0.1:{port}",
+                port=8305,
+                address="127.0.0.1",
+                api_key="readonly-key",
+            )
+            agent.start(retry=1)
+            time.sleep(0.2)
+            try:
+                assert agent.joined is False
+            finally:
+                agent.stop()
+        finally:
+            m.stop()

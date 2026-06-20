@@ -9,20 +9,21 @@ Commands
     huddle-cluster master start  [--host HOST] [--port PORT] [--timeout SEC]
                                  [--flap-window SEC] [--flap-threshold N]
                                  [--quarantine-recovery N] [--purge-after SEC]
+                                 [--api-key KEY=ROLE ...]
 
     huddle-cluster agent  start  --id ID --master URL --port PORT
                                  [--address IP] [--interval SEC]
-                                 [--retry N] [--meta key=val ...]
+                                 [--retry N] [--meta key=val ...] [--api-key KEY]
 
-    huddle-cluster nodes  list   [--master URL]
-    huddle-cluster nodes  status NODE_ID [--master URL]
+    huddle-cluster nodes  list   [--master URL] [--api-key KEY]
+    huddle-cluster nodes  status NODE_ID [--master URL] [--api-key KEY]
 
-    huddle-cluster cluster status [--master URL]
+    huddle-cluster cluster status [--master URL] [--api-key KEY]
     huddle-cluster cluster health [--master URL]
-    huddle-cluster cluster metrics [--master URL]
+    huddle-cluster cluster metrics [--master URL] [--api-key KEY]
 
 Author : Rahad Bhuiya
-Version: 2.2.0
+Version: 2.3.0
 License: MIT
 """
 
@@ -44,34 +45,53 @@ _DEFAULT_MASTER = "http://localhost:7070"
 # HTTP helpers
 
 
-def _get(master_url: str, path: str) -> Dict[str, Any]:
+def _build_get_request(master_url: str, path: str, api_key: Optional[str]) -> urllib.request.Request:
     url = f"{master_url.rstrip('/')}{path}"
+    req = urllib.request.Request(url)
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+    return req
+
+
+def _report_fetch_error(master_url: str, exc: Exception) -> None:
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code == 401:
+            print("\n[error] Authentication required — pass --api-key, "
+                  "or the key was rejected")
+        elif exc.code == 403:
+            print("\n[error] This API key doesn't have permission for this "
+                  "request (viewer keys can't modify the cluster)")
+        else:
+            try:
+                body = json.loads(exc.read())
+                print(f"\n[error] {body.get('error', exc.reason)}")
+            except Exception:
+                print(f"\n[error] HTTP {exc.code}: {exc.reason}")
+    elif isinstance(exc, urllib.error.URLError):
+        print(f"\n[error] Cannot reach master at {master_url}")
+        print(f"        {exc.reason}")
+        print("        Is the master running?  huddle-cluster master start")
+    else:
+        print(f"\n[error] {exc}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _get(master_url: str, path: str, api_key: Optional[str] = None) -> Dict[str, Any]:
+    req = _build_get_request(master_url, path, api_key)
     try:
-        with urllib.request.urlopen(url, timeout=5.0) as resp:
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
             return json.loads(resp.read())
-    except urllib.error.URLError as exc:
-        print(f"\n[error] Cannot reach master at {master_url}")
-        print(f"        {exc.reason}")
-        print("        Is the master running?  huddle-cluster master start")
-        sys.exit(1)
     except Exception as exc:
-        print(f"\n[error] {exc}", file=sys.stderr)
-        sys.exit(1)
+        _report_fetch_error(master_url, exc)
 
 
-def _get_text(master_url: str, path: str) -> str:
-    url = f"{master_url.rstrip('/')}{path}"
+def _get_text(master_url: str, path: str, api_key: Optional[str] = None) -> str:
+    req = _build_get_request(master_url, path, api_key)
     try:
-        with urllib.request.urlopen(url, timeout=5.0) as resp:
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
             return resp.read().decode()
-    except urllib.error.URLError as exc:
-        print(f"\n[error] Cannot reach master at {master_url}")
-        print(f"        {exc.reason}")
-        print("        Is the master running?  huddle-cluster master start")
-        sys.exit(1)
     except Exception as exc:
-        print(f"\n[error] {exc}", file=sys.stderr)
-        sys.exit(1)
+        _report_fetch_error(master_url, exc)
 
 
 def _print_json(data: Dict) -> None:
@@ -80,7 +100,6 @@ def _print_json(data: Dict) -> None:
 
 
 # Command handlers
-
 
 def cmd_master_start(args: argparse.Namespace) -> None:
     """Start a MasterNode (blocking until Ctrl-C)."""
@@ -93,6 +112,17 @@ def cmd_master_start(args: argparse.Namespace) -> None:
         datefmt="%H:%M:%S",
     )
 
+    api_keys: Optional[Dict[str, str]] = None
+    if args.api_key:
+        api_keys = {}
+        for item in args.api_key:
+            if "=" not in item:
+                print(f"[warn] ignoring malformed --api-key entry: {item!r} "
+                      f"(expected KEY=ROLE, e.g. --api-key secret123=admin)")
+                continue
+            k, role = item.split("=", 1)
+            api_keys[k.strip()] = role.strip()
+
     master = MasterNode(
         host=args.host,
         port=args.port,
@@ -101,6 +131,7 @@ def cmd_master_start(args: argparse.Namespace) -> None:
         flap_threshold=args.flap_threshold,
         quarantine_recovery_heartbeats=args.quarantine_recovery,
         purge_after_sec=args.purge_after,
+        api_keys=api_keys,
     )
 
     def on_join(node):
@@ -133,6 +164,7 @@ def cmd_master_start(args: argparse.Namespace) -> None:
           f"{args.flap_window:.0f}s, recover after {args.quarantine_recovery} heartbeats")
     if args.purge_after:
         print(f"  Purge     : dead nodes removed after {args.purge_after:.0f}s")
+    print(f"  Auth      : {'enabled (' + str(len(api_keys)) + ' key(s))' if api_keys else 'disabled (open API)'}")
     print(f"  API prefix: http://{args.host}:{args.port}{_API_V1}/")
     print("\n  Press Ctrl-C to stop.\n")
 
@@ -171,6 +203,7 @@ def cmd_agent_start(args: argparse.Namespace) -> None:
         address=args.address or None,
         heartbeat_interval_sec=args.interval,
         metadata=meta,
+        api_key=args.api_key,
     )
     agent.start(retry=args.retry)
 
@@ -192,7 +225,7 @@ def cmd_agent_start(args: argparse.Namespace) -> None:
 
 
 def cmd_nodes_list(args: argparse.Namespace) -> None:
-    data  = _get(args.master, f"{_API_V1}/nodes")
+    data  = _get(args.master, f"{_API_V1}/nodes", args.api_key)
     nodes = data.get("nodes", [])
 
     if not nodes:
@@ -210,12 +243,12 @@ def cmd_nodes_list(args: argparse.Namespace) -> None:
 
 
 def cmd_nodes_status(args: argparse.Namespace) -> None:
-    data = _get(args.master, f"{_API_V1}/nodes/{args.node_id}")
+    data = _get(args.master, f"{_API_V1}/nodes/{args.node_id}", args.api_key)
     _print_json(data)
 
 
 def cmd_cluster_status(args: argparse.Namespace) -> None:
-    data = _get(args.master, f"{_API_V1}/status")
+    data = _get(args.master, f"{_API_V1}/status", args.api_key)
 
     print(f"\nHuddleCluster Status")
     print(f"  Master      : {data.get('master')}")
@@ -238,7 +271,7 @@ def cmd_cluster_health(args: argparse.Namespace) -> None:
 
 
 def cmd_cluster_metrics(args: argparse.Namespace) -> None:
-    text = _get_text(args.master, f"{_API_V1}/metrics")
+    text = _get_text(args.master, f"{_API_V1}/metrics", args.api_key)
     print(text, end="")
 
 
@@ -277,6 +310,10 @@ def build_parser() -> argparse.ArgumentParser:
     ms.add_argument("--purge-after", type=float, default=None,
                     help="Remove dead nodes from the registry after this many seconds "
                          "(default: never purge)")
+    ms.add_argument("--api-key", action="append", metavar="KEY=ROLE",
+                    help="Add an API key with a role (admin or viewer); repeatable, "
+                         "e.g. --api-key secret123=admin --api-key view456=viewer. "
+                         "If never given, the API is open (no auth).")
     ms.set_defaults(func=cmd_master_start)
 
     
@@ -301,6 +338,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Join retry attempts  (default: 5)")
     ag.add_argument("--meta",     nargs="*", metavar="KEY=VAL",
                     help="Metadata key=value pairs, e.g. --meta region=us-east role=lb")
+    ag.add_argument("--api-key",  default=None,
+                    help="API key to authenticate with the master, if it requires auth")
     ag.set_defaults(func=cmd_agent_start)
 
     
@@ -313,12 +352,16 @@ def build_parser() -> argparse.ArgumentParser:
     nl = nodes_s.add_parser("list", help="List all registered nodes")
     nl.add_argument("--master", default=_DEFAULT_MASTER,
                     help=f"Master URL  (default: {_DEFAULT_MASTER})")
+    nl.add_argument("--api-key", default=None,
+                    help="API key, if the master requires auth")
     nl.set_defaults(func=cmd_nodes_list)
 
     ns = nodes_s.add_parser("status", help="Detailed status for one node")
     ns.add_argument("node_id", help="Node ID to inspect")
     ns.add_argument("--master", default=_DEFAULT_MASTER,
                     help=f"Master URL  (default: {_DEFAULT_MASTER})")
+    ns.add_argument("--api-key", default=None,
+                    help="API key, if the master requires auth")
     ns.set_defaults(func=cmd_nodes_status)
 
     
@@ -331,6 +374,8 @@ def build_parser() -> argparse.ArgumentParser:
     cs = cluster_s.add_parser("status", help="Show cluster status summary")
     cs.add_argument("--master", default=_DEFAULT_MASTER,
                     help=f"Master URL  (default: {_DEFAULT_MASTER})")
+    cs.add_argument("--api-key", default=None,
+                    help="API key, if the master requires auth")
     cs.set_defaults(func=cmd_cluster_status)
 
     ch = cluster_s.add_parser("health", help="Quick health check (exit 1 if not ok)")
@@ -341,6 +386,8 @@ def build_parser() -> argparse.ArgumentParser:
     cm = cluster_s.add_parser("metrics", help="Print Prometheus text exposition")
     cm.add_argument("--master", default=_DEFAULT_MASTER,
                     help=f"Master URL  (default: {_DEFAULT_MASTER})")
+    cm.add_argument("--api-key", default=None,
+                    help="API key, if the master requires auth")
     cm.set_defaults(func=cmd_cluster_metrics)
 
     return parser

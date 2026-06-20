@@ -9,7 +9,7 @@ communication with the MasterNode:
   - Deregisters gracefully on shutdown   (DELETE /v1/nodes/{id})
 
 Author : Rahad Bhuiya
-Version: 2.0.0
+Version: 2.3.0
 License: MIT
 """
 
@@ -77,6 +77,7 @@ class AgentNode:
         heartbeat_interval_sec: float = DEFAULT_HEARTBEAT_INTERVAL,
         request_timeout_sec: float = DEFAULT_REQUEST_TIMEOUT,
         metadata: Optional[Dict[str, Any]] = None,
+        api_key: Optional[str] = None,
         on_master_unreachable: Optional[Callable[[], None]] = None,
         on_recovered: Optional[Callable[[], None]] = None,
     ) -> None:
@@ -95,6 +96,7 @@ class AgentNode:
         self._interval = heartbeat_interval_sec
         self._request_timeout = request_timeout_sec
         self._metadata = metadata or {}
+        self._api_key  = api_key
         self._on_unreachable = on_master_unreachable
         self._on_recovered   = on_recovered
 
@@ -195,6 +197,7 @@ class AgentNode:
     
     # Internal — join
     
+
     def _join_with_retry(self, max_retry: int) -> None:
         for attempt in range(1, max_retry + 1):
             if self._send_join():
@@ -300,7 +303,7 @@ class AgentNode:
                 if master_reachable and self._consecutive_failures % 3 == 0:
                     should_rejoin = True
 
-        # -- fire actions OUTSIDE the lock --
+        #  fire actions OUTSIDE the lock 
 
         if should_rejoin:
             if self._send_join():
@@ -333,6 +336,8 @@ class AgentNode:
         url = f"{self._master}{_API_V1}/nodes/{self._node_id}"
         req = urllib.request.Request(url, method="DELETE")
         req.add_header("Content-Type", "application/json")
+        if self._api_key:
+            req.add_header("Authorization", f"Bearer {self._api_key}")
         try:
             with urllib.request.urlopen(req, timeout=self._request_timeout):
                 pass
@@ -357,6 +362,8 @@ class AgentNode:
         req  = urllib.request.Request(url, data=data, method="POST")
         req.add_header("Content-Type",   "application/json")
         req.add_header("Content-Length", str(len(data)))
+        if self._api_key:
+            req.add_header("Authorization", f"Bearer {self._api_key}")
         try:
             with urllib.request.urlopen(req, timeout=self._request_timeout) as resp:
                 return json.loads(resp.read())

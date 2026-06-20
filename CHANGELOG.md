@@ -5,6 +5,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.3.0] - 2026-06-18
+
+### Added — Level 2: Production Ready (in progress, 4/6)
+
+**RBAC / Authentication** (`huddle_cluster_pkg.cluster_master`)
+- New `api_keys: Dict[key, role]` constructor param. `None` (default) keeps
+  the API open exactly as before — fully backward compatible
+- Two roles: `viewer` (GET-only: health, status, metrics, nodes) and
+  `admin` (also join/heartbeat/leave). Unrecognized role strings rank as
+  no-access — a typo'd role fails closed, not open
+- Every request needs `Authorization: Bearer <key>` except `GET /v1/health`,
+  which is deliberately exempt so liveness probes don't need credentials
+- Unauthorized requests get `401` (missing/invalid key) or `403`
+  (valid key, insufficient role), logged as warnings for visibility
+- All error responses (auth and otherwise) now consistently include
+  `"ok": false` alongside `"error"`, for a uniform client contract
+- `AgentNode` gains an `api_key` param and sends it as a Bearer token on
+  every join/heartbeat/leave call
+- CLI: `master start --api-key KEY=ROLE` (repeatable); `agent start
+  --api-key KEY`; `--api-key` added to `nodes list/status` and `cluster
+  status/metrics` (not `cluster health`, which never needs auth)
+
+**Tests**
+- 13 new tests (`TestAuthentication`) — 74 total in `tests/test_cluster_master.py`
+- 6 new tests (`TestAgentApiKey`) — 32 total in `tests/test_cluster_agent.py`
+
+---
+
 ## [2.2.0] - 2026-06-18
 
 ### Added — Level 2: Production Ready (in progress, 3/6)
