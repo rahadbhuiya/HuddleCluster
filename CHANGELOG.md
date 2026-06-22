@@ -5,6 +5,101 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.6.0] - 2026-06-20
+
+### Added — Developer Experience (post-Level-2 polish)
+
+**Interactive API Docs** (`huddle_cluster_pkg.cluster_master`)
+- New `GET /v1/docs` endpoint: a Swagger UI page rendered against this
+  master's own `/v1/openapi.json` (v2.5.0), via the public Swagger UI CDN
+  bundle — no build step, same philosophy as the dashboard
+- Because the OpenAPI spec already declares a `BearerAuth` security
+  scheme, Swagger UI automatically renders an "Authorize" button — paste
+  an API key there once and every "Try it out" request carries it
+  automatically, no manual header-copying needed
+- New `MasterNode.swagger_html()` method, callable directly
+- The page itself never requires auth, same reasoning as `/dashboard` and
+  `/v1/openapi.json` — it's a static shell; the calls it makes from the
+  browser still respect `api_keys` normally
+- CLI: `master start` startup banner now also prints the docs URL
+
+**Tests**
+- 6 new tests (`TestSwaggerDocs`) — 112 total in `tests/test_cluster_master.py`
+
+---
+
+## [2.5.0] - 2026-06-20
+
+### Added — Level 2: Production Ready — COMPLETE (6/6)
+
+**REST API Expansion** (`huddle_cluster_pkg.cluster_master`)
+- `GET /v1/nodes` now supports filtering and pagination:
+  `?status=alive,quarantined` (comma-separated, validated — unknown values
+  return `400`), `?limit=N` and `?offset=N` (both validated as
+  non-negative integers). Response now includes `total`, `limit`, and
+  `offset` alongside the existing `nodes` key — fully backward compatible,
+  a plain `GET /v1/nodes` with no query string behaves as before
+- Results are now sorted by `node_id` for stable pagination across calls
+- `MasterNode.nodes()` gained an optional `status` filter parameter,
+  usable directly without going through HTTP
+- New `GET /v1/openapi.json` endpoint: a complete OpenAPI 3.0.3
+  specification of the REST API (paths, parameters, schemas, security
+  scheme), never requires auth — same reasoning as `/v1/health`, since
+  clients need the spec before they can know how auth even works
+- New `MasterNode.openapi_spec()` method, callable directly
+- `GET /v1/status` now reports `api_version` (currently `"1.0.0"`) for
+  clients that need to detect the API contract version
+- CLI: `nodes list` gains `--status`, `--limit`, `--offset`; new
+  `cluster openapi` command prints the spec as JSON
+
+**Tests**
+- 16 new tests (`TestNodesFilteringAndPagination`) — filtering, pagination,
+  validation, sorting, auth interaction
+- 6 new tests (`TestOpenApiSpec`) — spec structure, auth exemption,
+  path coverage
+- 106 total in `tests/test_cluster_master.py`
+
+This closes out Level 2 (Production Ready) of the roadmap. Level 3
+(Kubernetes/Swarm-grade: scheduler, auto-scaling, rolling updates, service
+discovery, HA master, multi-region) remains entirely unstarted.
+
+---
+
+## [2.4.0] - 2026-06-19
+
+### Added — Level 2: Production Ready (in progress, 5/6)
+
+**Web Dashboard** (`huddle_cluster_pkg.cluster_master`)
+- New `GET /dashboard` endpoint: a self-contained HTML/CSS/JS page showing
+  real-time cluster topology — no build step, no external JS framework,
+  one `<script>` tag polling the existing REST API
+- New `MasterNode.dashboard_html()` method, callable directly or served
+  via the new route
+- Dark "control room" visual theme (Space Grotesk for labels, JetBrains
+  Mono for IDs/addresses/numbers) distinct from generic AI-template looks
+- Summary cards (total/alive/quarantined/dead) plus a cluster health pill
+  driven by the same `cluster_unhealthy` flag from Monitoring (v2.2.0)
+- "Huddle strip" — a small colored dot per node, a visual nod to the
+  penguin-huddle metaphor the whole project is named after
+- Node table sorted problems-first (dead → quarantined → alive,
+  alphabetical within each group), showing status, node ID, address,
+  heartbeat count, last-seen, and forwarded metrics
+- Empty state shows the actual `huddle-cluster agent start` command to run
+- Auto-refreshes every 3 seconds via `setInterval` + `fetch` — no
+  WebSocket/SSE complexity, matching the raw-`http.server` foundation
+- The dashboard page itself never requires auth (it's a static shell, same
+  as any HTML page); its `fetch()` calls to `/v1/status` and `/v1/nodes`
+  go through the browser exactly like any API client and respect
+  `api_keys` (v2.3.0) if configured — entering a key in the page stores it
+  in the browser's own `localStorage`, never sent anywhere but back to
+  this master
+- CLI: `master start` now prints the dashboard URL in its startup banner
+
+**Tests**
+- 10 new tests (`TestDashboard`) — 84 total in `tests/test_cluster_master.py`
+
+---
+
 ## [2.3.0] - 2026-06-18
 
 ### Added — Level 2: Production Ready (in progress, 4/6)

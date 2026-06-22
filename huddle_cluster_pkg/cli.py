@@ -16,14 +16,16 @@ Commands
                                  [--retry N] [--meta key=val ...] [--api-key KEY]
 
     huddle-cluster nodes  list   [--master URL] [--api-key KEY]
+                                 [--status alive,quarantined] [--limit N] [--offset N]
     huddle-cluster nodes  status NODE_ID [--master URL] [--api-key KEY]
 
     huddle-cluster cluster status [--master URL] [--api-key KEY]
     huddle-cluster cluster health [--master URL]
     huddle-cluster cluster metrics [--master URL] [--api-key KEY]
+    huddle-cluster cluster openapi [--master URL]
 
 Author : Rahad Bhuiya
-Version: 2.3.0
+Version: 2.6.0
 License: MIT
 """
 
@@ -34,6 +36,7 @@ import json
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Dict
 
@@ -101,6 +104,7 @@ def _print_json(data: Dict) -> None:
 
 # Command handlers
 
+
 def cmd_master_start(args: argparse.Namespace) -> None:
     """Start a MasterNode (blocking until Ctrl-C)."""
     import logging
@@ -166,6 +170,9 @@ def cmd_master_start(args: argparse.Namespace) -> None:
         print(f"  Purge     : dead nodes removed after {args.purge_after:.0f}s")
     print(f"  Auth      : {'enabled (' + str(len(api_keys)) + ' key(s))' if api_keys else 'disabled (open API)'}")
     print(f"  API prefix: http://{args.host}:{args.port}{_API_V1}/")
+    _dash_host = "localhost" if args.host in ("0.0.0.0", "::") else args.host
+    print(f"  Dashboard : http://{_dash_host}:{args.port}/dashboard")
+    print(f"  API docs  : http://{_dash_host}:{args.port}{_API_V1}/docs")
     print("\n  Press Ctrl-C to stop.\n")
 
     try:
@@ -225,11 +232,24 @@ def cmd_agent_start(args: argparse.Namespace) -> None:
 
 
 def cmd_nodes_list(args: argparse.Namespace) -> None:
-    data  = _get(args.master, f"{_API_V1}/nodes", args.api_key)
+    params = {}
+    if args.status:
+        params["status"] = args.status
+    if args.limit is not None:
+        params["limit"] = args.limit
+    if args.offset:
+        params["offset"] = args.offset
+
+    path = f"{_API_V1}/nodes"
+    if params:
+        path += "?" + urllib.parse.urlencode(params)
+
+    data  = _get(args.master, path, args.api_key)
     nodes = data.get("nodes", [])
+    total = data.get("total")
 
     if not nodes:
-        print("No nodes registered with the master.")
+        print("No nodes match." if params else "No nodes registered with the master.")
         return
 
     hdr = f"{'NODE ID':<22} {'ADDRESS':<22} {'STATUS':<12} {'HB':<8} LAST SEEN"
@@ -240,6 +260,9 @@ def cmd_nodes_list(args: argparse.Namespace) -> None:
         addr = f"{n['address']}:{n['port']}"
         hb   = str(n.get("heartbeat_count", 0))
         print(f"{n['node_id']:<22} {addr:<22} {n['status']:<12} {hb:<8} {last}")
+
+    if total is not None and (args.limit is not None or args.offset):
+        print(f"\nShowing {len(nodes)} of {total} matching node(s)")
 
 
 def cmd_nodes_status(args: argparse.Namespace) -> None:
@@ -275,6 +298,11 @@ def cmd_cluster_metrics(args: argparse.Namespace) -> None:
     print(text, end="")
 
 
+def cmd_cluster_openapi(args: argparse.Namespace) -> None:
+    data = _get(args.master, f"{_API_V1}/openapi.json")   # never needs auth
+    _print_json(data)
+
+
 
 # Argument parser
 
@@ -287,9 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
     groups = parser.add_subparsers(dest="group", metavar="COMMAND")
     groups.required = True
 
-    
     # master
-    
     master_p = groups.add_parser("master", help="Master node commands")
     master_s = master_p.add_subparsers(dest="action", metavar="ACTION")
     master_s.required = True
@@ -316,9 +342,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "If never given, the API is open (no auth).")
     ms.set_defaults(func=cmd_master_start)
 
-    
     # agent
-    
     agent_p = groups.add_parser("agent", help="Agent node commands")
     agent_s = agent_p.add_subparsers(dest="action", metavar="ACTION")
     agent_s.required = True
@@ -342,9 +366,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="API key to authenticate with the master, if it requires auth")
     ag.set_defaults(func=cmd_agent_start)
 
-    
     # nodes
-    
     nodes_p = groups.add_parser("nodes", help="Node management commands")
     nodes_s = nodes_p.add_subparsers(dest="action", metavar="ACTION")
     nodes_s.required = True
@@ -354,6 +376,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help=f"Master URL  (default: {_DEFAULT_MASTER})")
     nl.add_argument("--api-key", default=None,
                     help="API key, if the master requires auth")
+    nl.add_argument("--status", default=None,
+                    help="Filter by status, comma-separated "
+                         "(e.g. --status alive,quarantined)")
+    nl.add_argument("--limit", type=int, default=None,
+                    help="Max number of nodes to return")
+    nl.add_argument("--offset", type=int, default=0,
+                    help="Number of nodes to skip  (default: 0)")
     nl.set_defaults(func=cmd_nodes_list)
 
     ns = nodes_s.add_parser("status", help="Detailed status for one node")
@@ -364,9 +393,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="API key, if the master requires auth")
     ns.set_defaults(func=cmd_nodes_status)
 
-    
     # cluster
-    
     cluster_p = groups.add_parser("cluster", help="Cluster-level commands")
     cluster_s = cluster_p.add_subparsers(dest="action", metavar="ACTION")
     cluster_s.required = True
@@ -389,6 +416,11 @@ def build_parser() -> argparse.ArgumentParser:
     cm.add_argument("--api-key", default=None,
                     help="API key, if the master requires auth")
     cm.set_defaults(func=cmd_cluster_metrics)
+
+    co = cluster_s.add_parser("openapi", help="Print the OpenAPI 3.0 spec for the REST API")
+    co.add_argument("--master", default=_DEFAULT_MASTER,
+                    help=f"Master URL  (default: {_DEFAULT_MASTER})")
+    co.set_defaults(func=cmd_cluster_openapi)
 
     return parser
 

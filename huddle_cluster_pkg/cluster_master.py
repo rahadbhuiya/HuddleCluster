@@ -11,7 +11,7 @@ deployment.  It does NOT route traffic itself; instead it:
   - Exposes a REST API consumed by the CLI and external tooling
 
 Author : Rahad Bhuiya
-Version: 2.3.0
+Version: 2.6.0
 License: MIT
 """
 
@@ -23,6 +23,7 @@ import logging
 import re
 import threading
 import time
+import urllib.parse
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -34,6 +35,8 @@ DEFAULT_FLAP_WINDOW: float = 300.0        # seconds — window for counting repe
 DEFAULT_FLAP_THRESHOLD: int = 3           # deaths within window that triggers quarantine
 DEFAULT_QUARANTINE_RECOVERY: int = 3      # consecutive heartbeats needed to exit quarantine
 _API_V1 = "/v1"
+_API_VERSION = "1.0.0"          # REST API contract version, reported in /v1/status
+_VALID_NODE_STATUSES = {"alive", "dead", "quarantined", "leaving"}
 
 # RBAC: higher rank can do everything a lower rank can. Unrecognized role
 # strings rank 0 (no access) so a typo'd role fails closed, not open.
@@ -44,9 +47,7 @@ def _role_satisfies(role: str, required: str) -> bool:
     return _ROLE_RANK.get(role, 0) >= _ROLE_RANK.get(required, 99)
 
 
-
 # NodeRecord
-
 
 @dataclass
 class NodeRecord:
@@ -83,7 +84,6 @@ class NodeRecord:
 
 # MasterNode
 
-
 class MasterNode:
     """
     Central coordinator for a HuddleCluster deployment.
@@ -98,13 +98,22 @@ class MasterNode:
     REST API (all responses are JSON):
 
         GET  /v1/health                       → {"status": "ok"}
+        GET  /v1/openapi.json                 → OpenAPI 3.0 spec for this API
+        GET  /v1/docs                         → interactive Swagger UI
         GET  /v1/status                       → cluster summary
         GET  /v1/metrics                      → Prometheus text exposition
-        GET  /v1/nodes                        → list of all nodes
+        GET  /v1/nodes  [?status=][&limit=][&offset=]
+                                               → paginated, filterable node list
         GET  /v1/nodes/<id>                   → single node record
         POST /v1/nodes/join                   → register a new agent
         POST /v1/nodes/<id>/heartbeat         → agent heartbeat
         DELETE /v1/nodes/<id>                 → agent graceful leave
+
+    Dashboard:
+        GET /dashboard                        → cluster topology web UI
+        (HTML page outside the /v1/ namespace; the page loads without auth,
+        but its fetch() calls to /v1/status and /v1/nodes still respect
+        api_keys if configured)
 
     Auto recovery:
         A node that dies and comes back too often within ``flap_window_sec``
@@ -189,9 +198,7 @@ class MasterNode:
         self._running = False
         self._started_at: Optional[float] = None
 
-    
     # Public API
-    
 
     @property
     def port(self) -> int:
@@ -229,10 +236,21 @@ class MasterNode:
             self._monitor_thread.join(timeout=1.0)
         logger.info("MasterNode stopped")
 
-    def nodes(self) -> List[Dict[str, Any]]:
-        """Snapshot of all registered nodes (any status)."""
+    def nodes(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Snapshot of all registered nodes, sorted by node_id for stable
+        pagination. If `status` is given, it may be a single status or a
+        comma-separated list (e.g. "alive,quarantined") to filter by.
+        """
         with self._lock:
-            return [n.to_dict() for n in self._nodes.values()]
+            records = list(self._nodes.values())
+
+        if status is not None:
+            wanted = {s.strip() for s in status.split(",") if s.strip()}
+            records = [n for n in records if n.status in wanted]
+
+        records.sort(key=lambda n: n.node_id)
+        return [n.to_dict() for n in records]
 
     def alive_nodes(self) -> List[Dict[str, Any]]:
         """Snapshot of nodes whose status is 'alive' (fully trusted)."""
@@ -259,6 +277,7 @@ class MasterNode:
             quarantined = sum(1 for n in self._nodes.values() if n.status == "quarantined")
         return {
             "master": f"{self._host}:{self._port}",
+            "api_version": _API_VERSION,
             "uptime_sec": round(
                 time.time() - (self._started_at or time.time()), 1
             ),
@@ -390,9 +409,654 @@ class MasterNode:
 
         return "\n".join(lines) + "\n"
 
-    
+    def dashboard_html(self) -> str:
+        """
+        Self-contained HTML/CSS/JS dashboard showing cluster-wide node
+        topology. Served at GET /dashboard (outside the /v1/ API namespace).
+        The page itself needs no auth to load — it's a static shell — but
+        its JS fetch() calls to /v1/status and /v1/nodes will get 401/403
+        from the browser if the master has api_keys configured, in which
+        case the user enters a key in the page itself (stored in their own
+        browser's localStorage, never sent anywhere but back to this master).
+        """
+        return r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>HuddleCluster — Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0E1217;
+    --panel: #161B24;
+    --panel-border: #232A38;
+    --text: #E7EAF0;
+    --text-dim: #7C8698;
+    --alive: #34D399;
+    --quarantined: #FBBF24;
+    --dead: #F87171;
+    --accent: #5EEAD4;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Space Grotesk', system-ui, sans-serif;
+    min-height: 100vh;
+  }
+  .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 28px;
+    border-bottom: 1px solid var(--panel-border);
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .brand { display: flex; align-items: baseline; gap: 10px; }
+  .brand h1 { font-size: 20px; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+  .brand span { font-size: 13px; color: var(--text-dim); }
+
+  .live {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; color: var(--text-dim); text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .pulse-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 0 rgba(94,234,212,0.6);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(94,234,212,0.55); }
+    70%  { box-shadow: 0 0 0 8px rgba(94,234,212,0); }
+    100% { box-shadow: 0 0 0 0 rgba(94,234,212,0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .pulse-dot { animation: none; }
+  }
+
+  .key-box { display: flex; align-items: center; gap: 8px; }
+  .key-box input {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    width: 190px;
+  }
+  .key-box input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .key-box button {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    color: var(--text-dim);
+    border-radius: 6px;
+    padding: 7px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    font-family: 'Space Grotesk', sans-serif;
+  }
+  .key-box button:hover { color: var(--text); border-color: var(--accent); }
+
+  main { padding: 24px 28px 40px; max-width: 1180px; margin: 0 auto; }
+
+  .auth-error {
+    display: none;
+    background: rgba(248,113,113,0.1);
+    border: 1px solid rgba(248,113,113,0.35);
+    color: var(--dead);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 13px;
+    margin-bottom: 18px;
+  }
+
+  .cards { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 22px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-left: 3px solid var(--accent);
+    border-radius: 8px;
+    padding: 14px 18px;
+    min-width: 130px;
+    flex: 1;
+  }
+  .card.alive       { border-left-color: var(--alive); }
+  .card.quarantined { border-left-color: var(--quarantined); }
+  .card.dead        { border-left-color: var(--dead); }
+  .card .num { font-family: 'JetBrains Mono', monospace; font-size: 26px; font-weight: 600; }
+  .card .lbl { font-size: 12px; color: var(--text-dim); margin-top: 2px; text-transform: uppercase; letter-spacing: 0.06em; }
+
+  .health-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 12px; border-radius: 100px;
+    font-size: 12px; font-weight: 600; letter-spacing: 0.04em;
+    margin-bottom: 18px;
+    background: rgba(52,211,153,0.12); color: var(--alive);
+    border: 1px solid rgba(52,211,153,0.3);
+  }
+  .health-pill.bad {
+    background: rgba(248,113,113,0.12); color: var(--dead);
+    border: 1px solid rgba(248,113,113,0.3);
+  }
+
+  .huddle-strip {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    padding: 16px;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    margin-bottom: 22px;
+    min-height: 20px;
+  }
+  .huddle-dot {
+    width: 13px; height: 13px; border-radius: 50%;
+    background: var(--alive);
+    cursor: default;
+  }
+  .huddle-dot.quarantined { background: var(--quarantined); }
+  .huddle-dot.dead { background: var(--dead); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead th {
+    text-align: left; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--text-dim);
+    padding: 10px 14px; border-bottom: 1px solid var(--panel-border);
+  }
+  tbody td {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  tbody tr:hover { background: rgba(255,255,255,0.02); }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .badge::before {
+    content: ''; width: 7px; height: 7px; border-radius: 50%;
+    background: currentColor;
+  }
+  .badge.alive { color: var(--alive); }
+  .badge.quarantined { color: var(--quarantined); }
+  .badge.dead { color: var(--dead); }
+
+  .empty {
+    text-align: center; padding: 60px 20px; color: var(--text-dim);
+    background: var(--panel); border: 1px solid var(--panel-border);
+    border-radius: 8px;
+  }
+  .empty .cmd {
+    display: inline-block; margin-top: 14px;
+    background: var(--bg); border: 1px solid var(--panel-border);
+    border-radius: 6px; padding: 10px 16px;
+    font-family: 'JetBrains Mono', monospace; font-size: 12.5px;
+    color: var(--accent);
+  }
+  footer {
+    text-align: center; color: var(--text-dim); font-size: 11px;
+    padding: 24px 0 8px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <h1>HuddleCluster</h1>
+    <span>cluster dashboard</span>
+  </div>
+  <div style="display:flex; align-items:center; gap:20px;">
+    <div class="live"><span class="pulse-dot"></span><span id="refresh-label">live</span></div>
+    <div class="key-box">
+      <input id="api-key" type="password" placeholder="API key (if required)" autocomplete="off"/>
+      <button id="key-save">Save</button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="auth-error" id="auth-error"></div>
+  <div class="health-pill" id="health-pill">checking…</div>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="huddle-strip" id="huddle-strip"></div>
+
+  <div id="table-wrap">
+    <table id="node-table" style="display:none;">
+      <thead>
+        <tr>
+          <th>Status</th><th>Node ID</th><th>Address</th>
+          <th>Heartbeats</th><th>Last seen</th><th>Metrics</th>
+        </tr>
+      </thead>
+      <tbody id="node-rows"></tbody>
+    </table>
+    <div class="empty" id="empty-state" style="display:none;">
+      No nodes registered with this master yet.
+      <div class="cmd">huddle-cluster agent start --id node-1 --master http://&lt;this-host&gt;:&lt;port&gt; --port 8080</div>
+    </div>
+  </div>
+
+  <footer>auto-refreshing every 3s</footer>
+</main>
+
+<script>
+const KEY_STORAGE = 'huddlecluster_dashboard_api_key';
+let apiKey = localStorage.getItem(KEY_STORAGE) || '';
+document.getElementById('api-key').value = apiKey;
+
+document.getElementById('key-save').addEventListener('click', () => {
+  apiKey = document.getElementById('api-key').value.trim();
+  localStorage.setItem(KEY_STORAGE, apiKey);
+  refresh();
+});
+
+function authHeaders() {
+  return apiKey ? { 'Authorization': 'Bearer ' + apiKey } : {};
+}
+
+function fmtAgo(sec) {
+  if (sec < 60) return sec.toFixed(0) + 's ago';
+  if (sec < 3600) return (sec/60).toFixed(0) + 'm ago';
+  return (sec/3600).toFixed(1) + 'h ago';
+}
+
+function fmtMetrics(m) {
+  if (!m || Object.keys(m).length === 0) return '—';
+  return Object.entries(m).slice(0, 3)
+    .map(([k, v]) => k + ': ' + (typeof v === 'number' ? v.toFixed(2).replace(/\.00$/, '') : v))
+    .join('  ·  ');
+}
+
+const STATUS_RANK = { dead: 0, quarantined: 1, alive: 2, leaving: 3 };
+
+async function refresh() {
+  const errBox = document.getElementById('auth-error');
+  try {
+    const [statusRes, nodesRes] = await Promise.all([
+      fetch('/v1/status', { headers: authHeaders() }),
+      fetch('/v1/nodes',  { headers: authHeaders() }),
+    ]);
+
+    if (statusRes.status === 401 || statusRes.status === 403 ||
+        nodesRes.status  === 401 || nodesRes.status  === 403) {
+      errBox.style.display = 'block';
+      errBox.textContent = statusRes.status === 401
+        ? 'Missing or invalid API key — enter one above and click Save.'
+        : 'This key doesn\'t have permission to view cluster data.';
+      return;
+    }
+    errBox.style.display = 'none';
+
+    const status = await statusRes.json();
+    const nodesBody = await nodesRes.json();
+    const nodes = nodesBody.nodes || [];
+
+    renderHealth(status);
+    renderCards(status);
+    renderHuddle(nodes);
+    renderTable(nodes);
+  } catch (e) {
+    errBox.style.display = 'block';
+    errBox.textContent = 'Cannot reach the master — is it still running?';
+  }
+}
+
+function renderHealth(status) {
+  const pill = document.getElementById('health-pill');
+  if (status.cluster_unhealthy) {
+    pill.className = 'health-pill bad';
+    pill.textContent = 'DEGRADED — below ' + Math.round((status.unhealthy_alive_ratio||0)*100) + '% alive';
+  } else {
+    pill.className = 'health-pill';
+    pill.textContent = 'HEALTHY';
+  }
+}
+
+function renderCards(status) {
+  const cards = [
+    ['total',       status.total_nodes,       ''],
+    ['alive',       status.alive_nodes,       'alive'],
+    ['quarantined', status.quarantined_nodes, 'quarantined'],
+    ['dead',        status.dead_nodes,        'dead'],
+  ];
+  document.getElementById('cards').innerHTML = cards.map(([label, val, cls]) =>
+    '<div class="card ' + cls + '"><div class="num">' + (val ?? 0) +
+    '</div><div class="lbl">' + label + '</div></div>'
+  ).join('');
+}
+
+function renderHuddle(nodes) {
+  document.getElementById('huddle-strip').innerHTML = nodes.map(n =>
+    '<div class="huddle-dot ' + n.status + '" title="' + n.node_id + ' — ' + n.status + '"></div>'
+  ).join('');
+}
+
+function renderTable(nodes) {
+  const table = document.getElementById('node-table');
+  const empty = document.getElementById('empty-state');
+  if (nodes.length === 0) {
+    table.style.display = 'none';
+    empty.style.display = 'block';
+    return;
+  }
+  table.style.display = 'table';
+  empty.style.display = 'none';
+
+  const sorted = [...nodes].sort((a, b) => {
+    const r = (STATUS_RANK[a.status] ?? 9) - (STATUS_RANK[b.status] ?? 9);
+    return r !== 0 ? r : a.node_id.localeCompare(b.node_id);
+  });
+
+  document.getElementById('node-rows').innerHTML = sorted.map(n => `
+    <tr>
+      <td><span class="badge ${n.status}">${n.status}</span></td>
+      <td class="mono">${n.node_id}</td>
+      <td class="mono">${n.address}:${n.port}</td>
+      <td class="mono">${n.heartbeat_count}</td>
+      <td>${fmtAgo(n.last_seen_ago_sec ?? 0)}</td>
+      <td class="mono">${fmtMetrics(n.metrics)}</td>
+    </tr>
+  `).join('');
+}
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>"""
+
+    def openapi_spec(self) -> Dict[str, Any]:
+        """
+        OpenAPI 3.0.3 specification describing the full REST API, served at
+        GET /v1/openapi.json (no auth required, same as /v1/health — clients
+        need the spec before they can know how auth even works).
+        """
+        node_record_schema = {
+            "type": "object",
+            "properties": {
+                "node_id":       {"type": "string"},
+                "address":       {"type": "string"},
+                "port":          {"type": "integer"},
+                "status":        {"type": "string", "enum": sorted(_VALID_NODE_STATUSES)},
+                "metadata":      {"type": "object"},
+                "joined_at":     {"type": "number"},
+                "last_heartbeat":{"type": "number"},
+                "last_seen_ago_sec": {"type": "number"},
+                "heartbeat_count": {"type": "integer"},
+                "death_count":   {"type": "integer"},
+                "recent_deaths": {"type": "array", "items": {"type": "number"}},
+                "consecutive_alive_heartbeats": {"type": "integer"},
+                "metrics":       {"type": "object"},
+            },
+        }
+        error_schema = {
+            "type": "object",
+            "properties": {
+                "ok":    {"type": "boolean", "enum": [False]},
+                "error": {"type": "string"},
+            },
+        }
+        auth_responses = {
+            "401": {"description": "Missing or invalid API key",
+                     "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+            "403": {"description": "Valid key, insufficient role",
+                     "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+        }
+
+        return {
+            "openapi": "3.0.3",
+            "info": {
+                "title": "HuddleCluster Master API",
+                "version": _API_VERSION,
+                "description": (
+                    "REST API for the HuddleCluster MasterNode — the central "
+                    "coordinator for a multi-node HuddleCluster deployment. "
+                    "Does not route traffic itself; tracks node enrollment, "
+                    "heartbeats, and cluster-wide health."
+                ),
+            },
+            "servers": [
+                {"url": f"http://{self._host}:{self._port}{_API_V1}"}
+            ],
+            "security": [{"BearerAuth": []}],
+            "components": {
+                "securitySchemes": {
+                    "BearerAuth": {
+                        "type": "http",
+                        "scheme": "bearer",
+                        "bearerFormat": "API key",
+                        "description": (
+                            "Required on every endpoint except /health and "
+                            "/openapi.json, when the master is configured "
+                            "with api_keys. Omit entirely if the master has "
+                            "no api_keys configured (open API)."
+                        ),
+                    },
+                },
+                "schemas": {
+                    "NodeRecord": node_record_schema,
+                    "Error": error_schema,
+                },
+            },
+            "paths": {
+                "/health": {
+                    "get": {
+                        "operationId": "getHealth",
+                        "summary": "Liveness check (never requires auth)",
+                        "security": [],
+                        "responses": {
+                            "200": {"description": "Master is up",
+                                     "content": {"application/json": {"schema": {
+                                         "type": "object",
+                                         "properties": {"status": {"type": "string", "enum": ["ok"]}},
+                                     }}}},
+                        },
+                    },
+                },
+                "/openapi.json": {
+                    "get": {
+                        "operationId": "getOpenApiSpec",
+                        "summary": "This specification (never requires auth)",
+                        "security": [],
+                        "responses": {
+                            "200": {"description": "OpenAPI 3.0 document"},
+                        },
+                    },
+                },
+                "/status": {
+                    "get": {
+                        "operationId": "getStatus",
+                        "summary": "Cluster-wide summary counts and configuration",
+                        "responses": {
+                            "200": {"description": "Cluster status"},
+                            **auth_responses,
+                        },
+                    },
+                },
+                "/metrics": {
+                    "get": {
+                        "operationId": "getMetrics",
+                        "summary": "Prometheus text exposition for the whole cluster",
+                        "responses": {
+                            "200": {"description": "Prometheus metrics",
+                                     "content": {"text/plain": {"schema": {"type": "string"}}}},
+                            **auth_responses,
+                        },
+                    },
+                },
+                "/nodes": {
+                    "get": {
+                        "operationId": "listNodes",
+                        "summary": "List registered nodes, with optional filtering and pagination",
+                        "parameters": [
+                            {"name": "status", "in": "query", "required": False,
+                             "schema": {"type": "string"},
+                             "description": "Comma-separated status filter, e.g. 'alive,quarantined'"},
+                            {"name": "limit", "in": "query", "required": False,
+                             "schema": {"type": "integer", "minimum": 0}},
+                            {"name": "offset", "in": "query", "required": False,
+                             "schema": {"type": "integer", "minimum": 0}},
+                        ],
+                        "responses": {
+                            "200": {"description": "Paginated node list",
+                                     "content": {"application/json": {"schema": {
+                                         "type": "object",
+                                         "properties": {
+                                             "nodes": {"type": "array",
+                                                       "items": {"$ref": "#/components/schemas/NodeRecord"}},
+                                             "total": {"type": "integer"},
+                                             "limit": {"type": ["integer", "null"]},
+                                             "offset": {"type": "integer"},
+                                         },
+                                     }}}},
+                            "400": {"description": "Invalid status/limit/offset value",
+                                     "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                            **auth_responses,
+                        },
+                    },
+                },
+                "/nodes/{node_id}": {
+                    "get": {
+                        "operationId": "getNode",
+                        "summary": "Single node record",
+                        "parameters": [
+                            {"name": "node_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                        ],
+                        "responses": {
+                            "200": {"description": "Node record",
+                                     "content": {"application/json": {"schema": {"$ref": "#/components/schemas/NodeRecord"}}}},
+                            "404": {"description": "No node with that ID",
+                                     "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                            **auth_responses,
+                        },
+                    },
+                    "delete": {
+                        "operationId": "leaveNode",
+                        "summary": "Graceful departure (requires admin role)",
+                        "parameters": [
+                            {"name": "node_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                        ],
+                        "responses": {
+                            "200": {"description": "Removed"},
+                            "404": {"description": "No node with that ID"},
+                            **auth_responses,
+                        },
+                    },
+                },
+                "/nodes/join": {
+                    "post": {
+                        "operationId": "joinNode",
+                        "summary": "Register a new agent, or refresh an existing one (requires admin role)",
+                        "requestBody": {
+                            "required": True,
+                            "content": {"application/json": {"schema": {
+                                "type": "object",
+                                "required": ["node_id", "address", "port"],
+                                "properties": {
+                                    "node_id": {"type": "string"},
+                                    "address": {"type": "string"},
+                                    "port": {"type": "integer"},
+                                    "metadata": {"type": "object"},
+                                },
+                            }}}},
+                        "responses": {
+                            "200": {"description": "Joined or re-joined"},
+                            "400": {"description": "Missing/invalid fields",
+                                     "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                            **auth_responses,
+                        },
+                    },
+                },
+                "/nodes/{node_id}/heartbeat": {
+                    "post": {
+                        "operationId": "heartbeat",
+                        "summary": "Send a heartbeat with optional forwarded metrics (requires admin role)",
+                        "parameters": [
+                            {"name": "node_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                        ],
+                        "requestBody": {
+                            "required": False,
+                            "content": {"application/json": {"schema": {
+                                "type": "object",
+                                "properties": {"metrics": {"type": "object"}},
+                            }}}},
+                        "responses": {
+                            "200": {"description": "Heartbeat recorded"},
+                            "404": {"description": "Unknown node_id",
+                                     "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                            **auth_responses,
+                        },
+                    },
+                },
+            },
+        }
+
+    def swagger_html(self) -> str:
+        """
+        Interactive API documentation at GET /v1/docs, rendered by the
+        public Swagger UI CDN bundle against this master's own
+        /v1/openapi.json. Needs no build step, same philosophy as
+        dashboard_html(). Because the spec already declares a BearerAuth
+        security scheme, Swagger UI renders its own "Authorize" button —
+        paste an API key there and every "Try it out" call carries it
+        automatically. The page itself never requires auth, same as
+        /v1/openapi.json and /dashboard.
+        """
+        return r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>HuddleCluster — API Docs</title>
+<link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"/>
+<style>
+  :root { --bg: #0E1217; --panel: #161B24; --panel-border: #232A38; --text: #E7EAF0; --accent: #5EEAD4; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); font-family: system-ui, sans-serif; }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 28px; border-bottom: 1px solid var(--panel-border);
+    color: var(--text);
+  }
+  header h1 { font-size: 19px; margin: 0; font-weight: 700; letter-spacing: -0.01em; }
+  header a { color: var(--accent); text-decoration: none; font-size: 13px; }
+  header a:hover { text-decoration: underline; }
+  #swagger-ui { background: #fff; }
+  .swagger-ui .topbar { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>HuddleCluster — API Docs</h1>
+  <a href="/dashboard">&larr; back to dashboard</a>
+</header>
+<div id="swagger-ui"></div>
+<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script>
+  window.onload = () => {
+    SwaggerUIBundle({
+      url: '/v1/openapi.json',
+      dom_id: '#swagger-ui',
+      presets: [SwaggerUIBundle.presets.apis],
+      layout: 'BaseLayout',
+    });
+  };
+</script>
+</body>
+</html>"""
+
     # Internal — HTTP server
-    
 
     def _start_http(self) -> None:
         master = self                            # captured in closure
@@ -473,8 +1137,19 @@ class MasterNode:
             def do_GET(self) -> None:
                 path = self.path.split("?")[0]
 
-                if path == f"{_API_V1}/health":
+                if path == "/dashboard":
+                    self._send_text(200, master.dashboard_html(),
+                                     "text/html; charset=utf-8")
+
+                elif path == f"{_API_V1}/health":
                     self._send_json(200, {"status": "ok"})   # never requires auth
+
+                elif path == f"{_API_V1}/openapi.json":
+                    self._send_json(200, master.openapi_spec())   # never requires auth
+
+                elif path == f"{_API_V1}/docs":
+                    self._send_text(200, master.swagger_html(),
+                                     "text/html; charset=utf-8")   # never requires auth
 
                 elif path == f"{_API_V1}/status":
                     if not self._check_auth("viewer"):
@@ -490,7 +1165,47 @@ class MasterNode:
                 elif path == f"{_API_V1}/nodes":
                     if not self._check_auth("viewer"):
                         return
-                    self._send_json(200, {"nodes": master.nodes()})
+
+                    qs = urllib.parse.parse_qs(
+                        urllib.parse.urlsplit(self.path).query
+                    )
+                    status_filter = qs.get("status", [None])[0]
+                    if status_filter is not None:
+                        requested = {s.strip() for s in status_filter.split(",") if s.strip()}
+                        unknown = requested - _VALID_NODE_STATUSES
+                        if unknown:
+                            self._send_json(400, {
+                                "ok": False,
+                                "error": f"unknown status value(s): {', '.join(sorted(unknown))} "
+                                         f"(valid: {', '.join(sorted(_VALID_NODE_STATUSES))})",
+                            })
+                            return
+
+                    try:
+                        limit  = int(qs["limit"][0])  if "limit"  in qs else None
+                        offset = int(qs["offset"][0]) if "offset" in qs else 0
+                    except (ValueError, IndexError):
+                        self._send_json(400, {"ok": False,
+                            "error": "limit and offset must be integers"})
+                        return
+                    if limit is not None and limit < 0:
+                        self._send_json(400, {"ok": False, "error": "limit must be >= 0"})
+                        return
+                    if offset < 0:
+                        self._send_json(400, {"ok": False, "error": "offset must be >= 0"})
+                        return
+
+                    all_nodes = master.nodes(status=status_filter)
+                    total = len(all_nodes)
+                    page = (all_nodes[offset:offset + limit]
+                            if limit is not None else all_nodes[offset:])
+
+                    self._send_json(200, {
+                        "nodes": page,
+                        "total": total,
+                        "limit": limit,
+                        "offset": offset,
+                    })
 
                 elif re.match(rf"{_API_V1}/nodes/([^/]+)$", path):
                     if not self._check_auth("viewer"):
@@ -559,7 +1274,6 @@ class MasterNode:
         )
         self._http_thread.start()
 
-    
     # Internal — heartbeat monitor
     
 
@@ -857,7 +1571,6 @@ class MasterNode:
 
         return {"ok": True, "node_id": node_id, "action": "left"}
 
-    
     # Repr
     
 

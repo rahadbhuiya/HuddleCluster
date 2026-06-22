@@ -12,9 +12,7 @@ import pytest
 from huddle_cluster_pkg.cluster_master import MasterNode, NodeRecord
 
 
-
 # Helpers
-
 
 def _free_port():
     import socket
@@ -1097,3 +1095,363 @@ class TestAuthentication:
             assert exc.value.code == 401
         finally:
             m.stop()
+
+
+class TestDashboard:
+    """GET /dashboard serves a self-contained HTML page. The page itself
+    never requires auth (it's a static shell); only the /v1/ API calls it
+    makes from the browser are subject to RBAC, exactly like any other
+    client."""
+
+    def _fetch_dashboard(self, port):
+        url = f"http://127.0.0.1:{port}/dashboard"
+        with urllib.request.urlopen(url, timeout=3) as r:
+            return r.status, dict(r.headers), r.read().decode()
+
+    def test_dashboard_returns_200(self, master):
+        status, headers, body = self._fetch_dashboard(master.port)
+        assert status == 200
+
+    def test_dashboard_content_type_is_html(self, master):
+        _, headers, _ = self._fetch_dashboard(master.port)
+        assert headers.get("Content-Type", "").startswith("text/html")
+
+    def test_dashboard_is_well_formed_html(self, master):
+        _, _, body = self._fetch_dashboard(master.port)
+        assert body.strip().startswith("<!DOCTYPE html>")
+        assert "<html" in body
+        assert "</html>" in body
+        assert body.count("<html") == body.count("</html>")
+        assert body.count("<head>") == body.count("</head>")
+        assert body.count("<body>") == body.count("</body>")
+
+    def test_dashboard_parses_without_html_errors(self, master):
+        """Run it through Python's strict HTML parser to catch unclosed tags."""
+        from html.parser import HTMLParser
+
+        class _StrictParser(HTMLParser):
+            def __init__(self):
+                super().__init__(convert_charrefs=True)
+                self.stack = []
+                self.void_tags = {
+                    "meta", "link", "br", "img", "input", "hr",
+                }
+
+            def handle_starttag(self, tag, attrs):
+                if tag not in self.void_tags:
+                    self.stack.append(tag)
+
+            def handle_startendtag(self, tag, attrs):
+                # Self-closed tag like <meta .../> — never push, and the
+                # parser's own endtag-on-startendtag behavior must not pop
+                # a real open element either.
+                pass
+
+            def handle_endtag(self, tag):
+                if tag in self.void_tags:
+                    return
+                assert self.stack and self.stack[-1] == tag, (
+                    f"Mismatched closing tag </{tag}>, stack was {self.stack}"
+                )
+                self.stack.pop()
+
+        _, _, body = self._fetch_dashboard(master.port)
+        parser = _StrictParser()
+        parser.feed(body)
+        assert parser.stack == [], f"Unclosed tags remain: {parser.stack}"
+
+    def test_dashboard_fetches_v1_status_and_nodes(self, master):
+        """The page's JS should reference the v1 endpoints it polls."""
+        _, _, body = self._fetch_dashboard(master.port)
+        assert "/v1/status" in body
+        assert "/v1/nodes" in body
+
+    def test_dashboard_works_without_auth_when_open(self, master):
+        status, _, _ = self._fetch_dashboard(master.port)
+        assert status == 200
+
+    def test_dashboard_loads_even_when_master_requires_auth(self):
+        """The dashboard SHELL itself is never gated — only its API calls are."""
+        port = _free_port()
+        m = MasterNode(host="127.0.0.1", port=port, heartbeat_timeout_sec=60,
+                        api_keys={"secret": "admin"})
+        m.start()
+        time.sleep(0.1)
+        try:
+            status, _, body = self._fetch_dashboard(port)
+            assert status == 200
+            assert "<!DOCTYPE html>" in body
+        finally:
+            m.stop()
+
+    def test_dashboard_does_not_leak_configured_api_keys(self):
+        """The static HTML template must never embed real key values."""
+        port = _free_port()
+        secret_key = "super-secret-value-12345"
+        m = MasterNode(host="127.0.0.1", port=port, heartbeat_timeout_sec=60,
+                        api_keys={secret_key: "admin"})
+        m.start()
+        time.sleep(0.1)
+        try:
+            _, _, body = self._fetch_dashboard(port)
+            assert secret_key not in body
+        finally:
+            m.stop()
+
+    def test_dashboard_html_method_directly(self, master):
+        """MasterNode.dashboard_html() is callable directly, not just via HTTP."""
+        html = master.dashboard_html()
+        assert isinstance(html, str)
+        assert "<!DOCTYPE html>" in html
+        assert "HuddleCluster" in html
+
+    def test_dashboard_includes_huddle_themed_styling(self, master):
+        """Sanity check the design intent (penguin-huddle metaphor, dark theme)."""
+        _, _, body = self._fetch_dashboard(master.port)
+        assert "huddle-dot" in body  # the per-node visual cluster strip
+        assert "#0E1217" in body or "0E1217" in body  # dark control-room bg
+
+
+class TestNodesFilteringAndPagination:
+    """GET /v1/nodes supports ?status=, ?limit=, ?offset= while staying
+    backward compatible with plain GET /v1/nodes (no params)."""
+
+    def _join(self, port, node_id, api_key=None):
+        return _post(port, "/nodes/join", {
+            "node_id": node_id, "address": "127.0.0.1", "port": 9700,
+        }, api_key=api_key)
+
+    def test_plain_request_unchanged_shape(self, master):
+        """No query params -> same 'nodes' key as before, now with extra metadata."""
+        self._join(master.port, "rp1")
+        data = _get(master.port, "/nodes")
+        assert "nodes" in data
+        assert len(data["nodes"]) == 1
+        assert data["total"] == 1
+        assert data["limit"] is None
+        assert data["offset"] == 0
+
+    def test_results_sorted_by_node_id(self, master):
+        for nid in ["zebra", "alpha", "mike"]:
+            self._join(master.port, nid)
+        data = _get(master.port, "/nodes")
+        ids = [n["node_id"] for n in data["nodes"]]
+        assert ids == sorted(ids)
+
+    def test_filter_by_single_status(self):
+        port = _free_port()
+        m = MasterNode(host="127.0.0.1", port=port, heartbeat_timeout_sec=0.4)
+        m.start()
+        time.sleep(0.1)
+        try:
+            self._join(port, "fs1")
+            self._join(port, "fs2")
+            time.sleep(0.7)   # both die
+            data = _get(port, "/nodes?status=dead")
+            assert {n["node_id"] for n in data["nodes"]} == {"fs1", "fs2"}
+            assert data["total"] == 2
+        finally:
+            m.stop()
+
+    def test_filter_by_multiple_statuses(self):
+        port = _free_port()
+        m = MasterNode(host="127.0.0.1", port=port, heartbeat_timeout_sec=0.4)
+        m.start()
+        time.sleep(0.1)
+        try:
+            self._join(port, "fm1")
+            self._join(port, "fm2")
+            time.sleep(0.7)
+            _post(port, "/nodes/fm1/heartbeat", {})   # fm1 alive, fm2 dead
+            data = _get(port, "/nodes?status=alive,dead")
+            assert {n["node_id"] for n in data["nodes"]} == {"fm1", "fm2"}
+        finally:
+            m.stop()
+
+    def test_filter_excludes_nonmatching(self):
+        port = _free_port()
+        m = MasterNode(host="127.0.0.1", port=port, heartbeat_timeout_sec=0.4)
+        m.start()
+        time.sleep(0.1)
+        try:
+            self._join(port, "fx1")
+            data = _get(port, "/nodes?status=dead")   # fx1 is alive
+            assert data["nodes"] == []
+            assert data["total"] == 0
+        finally:
+            m.stop()
+
+    def test_unknown_status_value_returns_400(self, master):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _get(master.port, "/nodes?status=zombie")
+        assert exc.value.code == 400
+
+    def test_limit_returns_subset(self, master):
+        for i in range(5):
+            self._join(master.port, f"lim{i}")
+        data = _get(master.port, "/nodes?limit=2")
+        assert len(data["nodes"]) == 2
+        assert data["total"] == 5
+        assert data["limit"] == 2
+
+    def test_offset_skips_results(self, master):
+        for i in range(5):
+            self._join(master.port, f"off{i}")
+        full = _get(master.port, "/nodes")["nodes"]
+        offset_data = _get(master.port, "/nodes?offset=2")
+        assert offset_data["nodes"] == full[2:]
+        assert offset_data["offset"] == 2
+
+    def test_limit_and_offset_together(self, master):
+        for i in range(5):
+            self._join(master.port, f"page{i}")
+        data = _get(master.port, "/nodes?limit=2&offset=2")
+        full = _get(master.port, "/nodes")["nodes"]
+        assert data["nodes"] == full[2:4]
+
+    def test_limit_zero_returns_empty_but_valid(self, master):
+        self._join(master.port, "lz1")
+        data = _get(master.port, "/nodes?limit=0")
+        assert data["nodes"] == []
+        assert data["total"] == 1
+
+    def test_negative_limit_returns_400(self, master):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _get(master.port, "/nodes?limit=-1")
+        assert exc.value.code == 400
+
+    def test_negative_offset_returns_400(self, master):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _get(master.port, "/nodes?offset=-1")
+        assert exc.value.code == 400
+
+    def test_non_integer_limit_returns_400(self, master):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _get(master.port, "/nodes?limit=abc")
+        assert exc.value.code == 400
+
+    def test_offset_beyond_total_returns_empty(self, master):
+        self._join(master.port, "ob1")
+        data = _get(master.port, "/nodes?offset=999")
+        assert data["nodes"] == []
+        assert data["total"] == 1
+
+    def test_filtering_respects_auth(self):
+        port = _free_port()
+        m = MasterNode(host="127.0.0.1", port=port, heartbeat_timeout_sec=60,
+                        api_keys={"k": "viewer"})
+        m.start()
+        time.sleep(0.1)
+        try:
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                _get(port, "/nodes?status=alive")   # no key
+            assert exc.value.code == 401
+            data = _get(port, "/nodes?status=alive", api_key="k")
+            assert data["nodes"] == []
+        finally:
+            m.stop()
+
+    def test_nodes_method_direct_filter(self, master):
+        """MasterNode.nodes(status=...) is usable directly, not just via HTTP."""
+        self._join(master.port, "direct1")
+        result = master.nodes(status="alive")
+        assert len(result) == 1
+        assert result[0]["node_id"] == "direct1"
+        empty = master.nodes(status="dead")
+        assert empty == []
+
+
+class TestOpenApiSpec:
+    def test_openapi_endpoint_returns_200(self, master):
+        data = _get(master.port, "/openapi.json")
+        assert data["openapi"].startswith("3.")
+
+    def test_openapi_never_requires_auth(self):
+        port = _free_port()
+        m = MasterNode(host="127.0.0.1", port=port, heartbeat_timeout_sec=60,
+                        api_keys={"k": "admin"})
+        m.start()
+        time.sleep(0.1)
+        try:
+            data = _get(port, "/openapi.json")   # no key passed
+            assert "paths" in data
+        finally:
+            m.stop()
+
+    def test_openapi_lists_all_documented_paths(self, master):
+        data = _get(master.port, "/openapi.json")
+        paths = set(data["paths"].keys())
+        assert "/health" in paths
+        assert "/status" in paths
+        assert "/metrics" in paths
+        assert "/nodes" in paths
+        assert "/nodes/{node_id}" in paths
+        assert "/nodes/join" in paths
+        assert "/nodes/{node_id}/heartbeat" in paths
+
+    def test_openapi_has_required_top_level_fields(self, master):
+        data = _get(master.port, "/openapi.json")
+        assert "info" in data
+        assert "paths" in data
+        assert "components" in data
+        assert data["info"]["title"]
+        assert data["info"]["version"]
+
+    def test_openapi_method_direct(self, master):
+        """MasterNode.openapi_spec() is usable directly, not just via HTTP."""
+        spec = master.openapi_spec()
+        assert isinstance(spec, dict)
+        assert spec["openapi"].startswith("3.")
+
+    def test_status_reports_api_version(self, master):
+        status = _get(master.port, "/status")
+        assert "api_version" in status
+        assert status["api_version"]
+
+
+class TestSwaggerDocs:
+    """GET /v1/docs serves an interactive Swagger UI shell pointed at this
+    master's own /v1/openapi.json. The page itself never requires auth,
+    same reasoning as /dashboard and /v1/openapi.json."""
+
+    def _fetch_docs(self, port):
+        url = f"http://127.0.0.1:{port}/v1/docs"
+        with urllib.request.urlopen(url, timeout=3) as r:
+            return r.status, dict(r.headers), r.read().decode()
+
+    def test_docs_returns_200(self, master):
+        status, _, _ = self._fetch_docs(master.port)
+        assert status == 200
+
+    def test_docs_content_type_is_html(self, master):
+        _, headers, _ = self._fetch_docs(master.port)
+        assert headers.get("Content-Type", "").startswith("text/html")
+
+    def test_docs_is_well_formed_html(self, master):
+        _, _, body = self._fetch_docs(master.port)
+        assert body.strip().startswith("<!DOCTYPE html>")
+        assert "<html" in body and "</html>" in body
+        assert body.count("<html") == body.count("</html>")
+
+    def test_docs_points_at_own_openapi_spec(self, master):
+        _, _, body = self._fetch_docs(master.port)
+        assert "/v1/openapi.json" in body
+
+    def test_docs_never_requires_auth(self):
+        port = _free_port()
+        m = MasterNode(host="127.0.0.1", port=port, heartbeat_timeout_sec=60,
+                        api_keys={"secret": "admin"})
+        m.start()
+        time.sleep(0.1)
+        try:
+            status, _, body = self._fetch_docs(port)
+            assert status == 200
+            assert "<!DOCTYPE html>" in body
+        finally:
+            m.stop()
+
+    def test_swagger_html_method_direct(self, master):
+        html = master.swagger_html()
+        assert isinstance(html, str)
+        assert "<!DOCTYPE html>" in html
+        assert "SwaggerUIBundle" in html

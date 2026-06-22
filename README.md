@@ -9,7 +9,7 @@
 A penguin-inspired, self-organizing server load balancer with adaptive thermal eviction.
 
 **Author:** Rahad Bhuiya <br>
-**Version:** 2.3.0 <br>
+**Version:** 2.6.0 <br>
 **License:** MIT <br>
 **Paper:** [HuddleCluster: A Penguin-Inspired Self-Organizing Load Balancer with Adaptive Thermal Eviction](https://github.com/rahadbhuiya/HuddleCluster/blob/main/docs/HuddleCluster.pdf)
 
@@ -442,13 +442,77 @@ agent.start()
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/v1/health` | `{"status": "ok"}` |
-| `GET` | `/v1/status` | Cluster summary (node counts, uptime) |
+| `GET` | `/v1/openapi.json` | OpenAPI 3.0 spec for this whole API |
+| `GET` | `/v1/docs` | Interactive Swagger UI |
+| `GET` | `/v1/status` | Cluster summary (node counts, uptime, `api_version`) |
 | `GET` | `/v1/metrics` | Prometheus text exposition (cluster-wide) |
-| `GET` | `/v1/nodes` | List all nodes |
+| `GET` | `/v1/nodes` `?status=&limit=&offset=` | Filterable, paginated node list |
 | `GET` | `/v1/nodes/{id}` | Single node record |
 | `POST` | `/v1/nodes/join` | Agent enrollment |
 | `POST` | `/v1/nodes/{id}/heartbeat` | Heartbeat + metrics |
 | `DELETE` | `/v1/nodes/{id}` | Graceful departure |
+
+### Filtering, Pagination & OpenAPI Spec (Level 2)
+
+`GET /v1/nodes` supports query parameters for larger clusters:
+
+```bash
+curl "http://localhost:7070/v1/nodes?status=alive,quarantined&limit=20&offset=0"
+huddle-cluster nodes list --status dead --limit 10
+```
+
+```json
+{"nodes": [...], "total": 47, "limit": 20, "offset": 0}
+```
+
+`status` filters can be comma-separated (`alive`, `dead`, `quarantined`,
+`leaving`); an unrecognized value returns `400`. Results are sorted by
+`node_id`, so pagination stays stable across calls. A plain
+`GET /v1/nodes` with no query string behaves exactly as before — `total`,
+`limit`, and `offset` are additive, not breaking.
+
+The whole API is also described as a machine-readable spec:
+
+```bash
+huddle-cluster cluster openapi
+# or
+curl http://localhost:7070/v1/openapi.json
+```
+
+This never requires auth — the spec describes how auth works, so a client
+needs to read it before it can know how to authenticate.
+
+For browsing and trying the API interactively, open `/v1/docs` — a
+Swagger UI page rendered against the same spec. Because the spec declares
+the Bearer auth scheme, Swagger UI shows an "Authorize" button: paste an
+API key once and every "Try it out" call carries it automatically.
+
+```
+http://localhost:7070/v1/docs
+```
+
+### Web Dashboard (Level 2)
+
+A real-time cluster topology view, served directly by the master — no
+separate process, no build step:
+
+```bash
+huddle-cluster master start
+# Dashboard : http://localhost:7070/dashboard
+```
+
+It shows summary cards (alive/quarantined/dead counts), a cluster health
+pill, a small colored dot per node (a nod to the penguin-huddle metaphor),
+and a sortable table with each node's status, address, heartbeat count,
+last-seen time, and forwarded metrics. It auto-refreshes every 3 seconds
+by polling the same `/v1/status` and `/v1/nodes` endpoints any other
+client would use.
+
+The page itself loads with no credentials needed — it's a static shell —
+but if the master has `api_keys` configured (see below), its `fetch()`
+calls will get `401`/`403` until you enter a key in the field at the top
+of the page. That key is stored only in your own browser's `localStorage`
+and sent only back to this master.
 
 ### Authentication & RBAC (Level 2)
 
@@ -610,7 +674,7 @@ HuddleCluster/
 |   |   |-- nginx_lc.conf          # NGINX least-connections config
 |   |-- run_http_benchmark.bat     # Windows one-click runner
 |
-|-- tests/                         # 533 tests across 19 modules
+|-- tests/                         # 571 tests across 19 modules
 |   |-- test_rotation.py           # Rotation, eviction, feedback loop
 |   |-- test_fairness.py           # Fairness and Gini tests
 |   |-- test_stress.py             # Concurrent load tests
@@ -628,7 +692,7 @@ HuddleCluster/
 |   |-- test_redis_backend.py      # Redis backend tests (uses fakeredis mock)
 |   |-- test_grpc_cluster.py       # gRPC cluster tests (uses grpc mock)
 |   |-- test_k8s_discovery.py      # K8s discovery tests (uses k8s mock)
-|   |-- test_cluster_master.py     # MasterNode tests — 74 tests (v2.0.0)
+|   |-- test_cluster_master.py     # MasterNode tests — 112 tests (v2.0.0)
 |   |-- test_cluster_agent.py      # AgentNode tests  — 32 tests (v2.0.0)
 |   |-- conftest.py                # Shared fixtures
 |
@@ -863,13 +927,13 @@ Setup PyPI Trusted Publishing:
 - [x] Node list with status, metrics, last-seen-ago — v2.0.0
 - [x] `huddle-cluster` CLI (master start, agent start, nodes list, cluster status) — v2.0.0
 
-**Level 2 — Production Ready (in progress, 4/6)**
+**Level 2 — Production Ready — COMPLETE (6/6)**
 - [x] Auto recovery — flapping detection (quarantine) and stale-node purge — v2.1.0
-- [ ] Web dashboard — real-time cluster topology view
+- [x] Web dashboard — real-time cluster topology view — v2.4.0
 - [x] RBAC / authentication — API key with admin/viewer roles — v2.3.0
 - [x] Monitoring — `unhealthy_alive_ratio` threshold + on_cluster_unhealthy/recovered — v2.2.0
 - [x] Metrics — `GET /v1/metrics` Prometheus exposition, per-node + cluster-wide — v2.2.0
-- [ ] REST API — full OpenAPI spec with versioning
+- [x] REST API — filtering/pagination on `/v1/nodes`, OpenAPI 3.0 spec — v2.5.0
 
 **Level 3 — Kubernetes / Swarm-grade (planned)**
 - [ ] Scheduler — place workloads on nodes based on thermal fitness
