@@ -10,6 +10,13 @@ Cluster management (v2.0.0)
                     live thermal metrics from a HuddleCluster instance.
     NodeRecord      Dataclass representing a registered node in the master.
 
+Scheduler (v3.0.0)
+-------------------
+    ClusterScheduler  Thermal-fitness workload placement at the cluster level.
+                      Pass scheduler=ClusterScheduler() to MasterNode to enable
+                      GET /v1/scheduler/next, GET /v1/scheduler/stats, and
+                      POST /v1/scheduler/report.
+
 Third-party backends (optional, require extra dependencies)
 -----------------------------------------------------------
     RedisClusterBackend   Redis shared-state for multi-process deployments.
@@ -31,12 +38,15 @@ CLI
         huddle-cluster cluster health
 """
 
-from huddle_cluster_pkg.cluster_master import MasterNode, NodeRecord
-from huddle_cluster_pkg.cluster_agent  import AgentNode
+from huddle_cluster_pkg.cluster_master    import MasterNode, NodeRecord
+from huddle_cluster_pkg.cluster_agent     import AgentNode
+from huddle_cluster_pkg.cluster_scheduler import ClusterScheduler
 
 __all__ = [
     # Cluster management
     "MasterNode",
     "NodeRecord",
     "AgentNode",
+    # Scheduler
+    "ClusterScheduler",
 ]

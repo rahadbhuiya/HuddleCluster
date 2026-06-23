@@ -11,7 +11,7 @@ deployment.  It does NOT route traffic itself; instead it:
   - Exposes a REST API consumed by the CLI and external tooling
 
 Author : Rahad Bhuiya
-Version: 2.6.0
+Version: 3.0.0
 License: MIT
 """
 
@@ -28,6 +28,18 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Scheduler is imported lazily to avoid a hard dependency — if the user
+# never passes scheduler=... it's never imported at all.
+_ClusterSchedulerType = None
+
+
+def _get_scheduler_class():
+    global _ClusterSchedulerType
+    if _ClusterSchedulerType is None:
+        from huddle_cluster_pkg.cluster_scheduler import ClusterScheduler
+        _ClusterSchedulerType = ClusterScheduler
+    return _ClusterSchedulerType
 
 DEFAULT_MASTER_PORT: int = 7070
 DEFAULT_HEARTBEAT_TIMEOUT: float = 30.0   # seconds until node is marked dead
@@ -47,7 +59,9 @@ def _role_satisfies(role: str, required: str) -> bool:
     return _ROLE_RANK.get(role, 0) >= _ROLE_RANK.get(required, 99)
 
 
+
 # NodeRecord
+
 
 @dataclass
 class NodeRecord:
@@ -84,6 +98,7 @@ class NodeRecord:
 
 # MasterNode
 
+
 class MasterNode:
     """
     Central coordinator for a HuddleCluster deployment.
@@ -108,6 +123,11 @@ class MasterNode:
         POST /v1/nodes/join                   → register a new agent
         POST /v1/nodes/<id>/heartbeat         → agent heartbeat
         DELETE /v1/nodes/<id>                 → agent graceful leave
+
+    Scheduler (Level 3, optional — enabled by passing scheduler=ClusterScheduler()):
+        GET  /v1/scheduler/next  [?affinity=] → pick the best node for a workload
+        GET  /v1/scheduler/stats              → heat map and placement counts
+        POST /v1/scheduler/report             → record workload completion
 
     Dashboard:
         GET /dashboard                        → cluster topology web UI
@@ -142,6 +162,7 @@ class MasterNode:
         purge_after_sec: Optional[float] = None,
         unhealthy_alive_ratio: Optional[float] = None,
         api_keys: Optional[Dict[str, str]] = None,
+        scheduler: Optional[Any] = None,
         on_node_join: Optional[Callable[[NodeRecord], None]] = None,
         on_node_leave: Optional[Callable[[NodeRecord], None]] = None,
         on_node_dead: Optional[Callable[[NodeRecord], None]] = None,
@@ -181,6 +202,8 @@ class MasterNode:
                         key[-4:] if len(key) >= 4 else key, role,
                     )
 
+        self._scheduler = scheduler
+
         self._nodes: Dict[str, NodeRecord] = {}
         self._lock = threading.RLock()
 
@@ -198,7 +221,9 @@ class MasterNode:
         self._running = False
         self._started_at: Optional[float] = None
 
+    
     # Public API
+    
 
     @property
     def port(self) -> int:
@@ -292,6 +317,7 @@ class MasterNode:
             "purge_after_sec": self._purge_after,
             "cluster_unhealthy": self._cluster_unhealthy,
             "unhealthy_alive_ratio": self._unhealthy_alive_ratio,
+            "scheduler": "enabled" if self._scheduler is not None else "disabled",
         }
 
     def prometheus_metrics(self) -> str:
@@ -378,7 +404,7 @@ class MasterNode:
                 f'huddle_node_last_seen_seconds{{node_id="{n.node_id}"}} {n.last_seen_ago:.1f}'
             )
 
-        #  forwarded per-node metrics (optional — only if present) 
+        # ---- forwarded per-node metrics (optional — only if present) ---
 
         forwarded = {
             "fairness_score":   ("huddle_node_fairness_score",
@@ -1056,7 +1082,9 @@ setInterval(refresh, 3000);
 </body>
 </html>"""
 
+    
     # Internal — HTTP server
+    
 
     def _start_http(self) -> None:
         master = self                            # captured in closure
@@ -1156,6 +1184,39 @@ setInterval(refresh, 3000);
                         return
                     self._send_json(200, master.status())
 
+                elif path == f"{_API_V1}/scheduler/next":
+                    if not self._check_auth("viewer"):
+                        return
+                    if master._scheduler is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "scheduler is not enabled on this master",
+                        })
+                        return
+                    qs = urllib.parse.parse_qs(
+                        urllib.parse.urlsplit(self.path).query
+                    )
+                    affinity = qs.get("affinity", [None])[0]
+                    node = master._scheduler.pick(master.nodes(), affinity_key=affinity)
+                    if node is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "no eligible node available",
+                        })
+                    else:
+                        self._send_json(200, {"ok": True, "node": node})
+
+                elif path == f"{_API_V1}/scheduler/stats":
+                    if not self._check_auth("viewer"):
+                        return
+                    if master._scheduler is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "scheduler is not enabled on this master",
+                        })
+                        return
+                    self._send_json(200, master._scheduler.scheduler_stats())
+
                 elif path == f"{_API_V1}/metrics":
                     if not self._check_auth("viewer"):
                         return
@@ -1248,6 +1309,31 @@ setInterval(refresh, 3000);
                     result = master._handle_heartbeat(node_id, body)
                     self._send_json(200 if result.get("ok") else 404, result)
 
+                elif path == f"{_API_V1}/scheduler/report":
+                    if not self._check_auth("admin"):
+                        return
+                    if master._scheduler is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "scheduler is not enabled on this master",
+                        })
+                        return
+                    body = self._read_json()
+                    if body is None:
+                        self._send_json(400, {"ok": False, "error": "invalid JSON"})
+                        return
+                    node_id = (body.get("node_id") or "").strip()
+                    if not node_id:
+                        self._send_json(400, {"ok": False,
+                            "error": "node_id is required"})
+                        return
+                    master._scheduler.record_report(
+                        node_id=node_id,
+                        duration_ms=body.get("duration_ms"),
+                        success=bool(body.get("success", True)),
+                    )
+                    self._send_json(200, {"ok": True, "recorded": node_id})
+
                 else:
                     self._send_json(404, {"ok": False, "error": "not found"})
 
@@ -1274,6 +1360,7 @@ setInterval(refresh, 3000);
         )
         self._http_thread.start()
 
+    
     # Internal — heartbeat monitor
     
 
@@ -1571,6 +1658,7 @@ setInterval(refresh, 3000);
 
         return {"ok": True, "node_id": node_id, "action": "left"}
 
+    
     # Repr
     
 

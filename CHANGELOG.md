@@ -5,6 +5,51 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.0.0] - 2026-06-21
+
+### Added — Level 3: Kubernetes/Swarm-grade (in progress, 1/6)
+
+**Cluster Scheduler** (`huddle_cluster_pkg.cluster_scheduler`)
+- New `ClusterScheduler` class: thermal-fitness workload placement that
+  applies the same inner/outer ring philosophy from the single-instance
+  `HuddleCluster` to the multi-node cluster level
+- Fitness scoring composed of: freshness (recency of last heartbeat),
+  stability (inverse of death count), quarantine penalty (50 % for
+  not-yet-trusted nodes), load hint (inverse of forwarded
+  `requests_per_sec`), and a warm-up bonus for newly-joined nodes
+- Heat model: each time a node is selected its heat increases by 1.0;
+  heat decays exponentially with a configurable half-life (`cooldown_sec`,
+  default 10 s) so idle nodes cool back down without any explicit signal
+- Sticky affinity: pass `?affinity=<key>` to get the same node every time
+  for a session/user; falls back to the best available node if the bound
+  one dies or becomes quarantined
+- `prefer_alive` (default True): alive nodes are always tried before
+  quarantined ones, even if the quarantined node has a higher raw score
+- `ClusterScheduler.scheduler_stats()`: returns the heat map and per-node
+  placement counts for monitoring
+- `ClusterScheduler.record_report()`: clients can report workload completion
+  (node_id, duration_ms, success); history capped at 1000 entries
+- Plug-in design: pass `scheduler=ClusterScheduler()` to `MasterNode` to
+  enable; omitting it (the default) keeps backward compatibility entirely
+- `MasterNode.status()` now reports `"scheduler": "enabled"/"disabled"`
+- New REST endpoints (only mounted when scheduler is configured):
+  `GET /v1/scheduler/next [?affinity=]` — pick the best node (503 if none);
+  `GET /v1/scheduler/stats` — heat map and workload counts;
+  `POST /v1/scheduler/report` — record workload completion
+- `ClusterScheduler` exported from `huddle_cluster_pkg` top-level
+
+**Tests** (`tests/test_cluster_scheduler.py`, new file)
+- 8 fitness-scoring unit tests
+- 11 `pick()` / `record_report()` unit tests
+- 13 HTTP integration tests via `MasterNode`
+- 32 total new tests
+
+This is the first Level 3 (Kubernetes/Swarm-grade) item and a major
+version bump (2.x → 3.0.0), since it introduces a new cluster-level
+abstraction (`ClusterScheduler`) and new REST endpoints.
+
+---
+
 ## [2.6.0] - 2026-06-20
 
 ### Added — Developer Experience (post-Level-2 polish)

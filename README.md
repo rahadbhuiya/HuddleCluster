@@ -1,947 +1,155 @@
-# HuddleCluster
-
 <p align="center">
-  <img src="https://raw.githubusercontent.com/rahadbhuiya/HuddleCluster/main/assets/logo.svg" width="400" alt="HuddleCluster logo"/>
+  <img src="https://raw.githubusercontent.com/rahadbhuiya/HuddleCluster/main/assets/logo.svg" width="380" alt="HuddleCluster"/>
 </p>
 
+<p align="center">
+  <a href="https://pypi.org/project/huddle-cluster/"><img src="https://img.shields.io/pypi/v/huddle-cluster?color=0e7a0e&label=PyPI" alt="PyPI version"/></a>
+  <a href="https://pypi.org/project/huddle-cluster/"><img src="https://img.shields.io/pypi/pyversions/huddle-cluster?color=0e7a0e" alt="Python versions"/></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"/></a>
+  <a href="https://doi.org/10.5281/zenodo.20348019"><img src="https://img.shields.io/badge/DOI-10.5281%2Fzenodo.20348019-blue" alt="DOI"/></a>
+  <a href="https://github.com/rahadbhuiya/HuddleCluster/actions"><img src="https://img.shields.io/github/actions/workflow/status/rahadbhuiya/HuddleCluster/ci.yml?label=tests" alt="CI"/></a>
+</p>
 
-
-A penguin-inspired, self-organizing server load balancer with adaptive thermal eviction.
-
-**Author:** Rahad Bhuiya <br>
-**Version:** 2.6.0 <br>
-**License:** MIT <br>
-**Paper:** [HuddleCluster: A Penguin-Inspired Self-Organizing Load Balancer with Adaptive Thermal Eviction](https://github.com/rahadbhuiya/HuddleCluster/blob/main/docs/HuddleCluster.pdf)
-
----
-
-## The Idea
-
-Emperor Penguins survive Antarctic winters by forming huddles. Penguins on the cold outer edge
-push inward toward warmth, while those in the center gradually rotate outward to rest — with no
-central coordinator, only local temperature thresholds.
-
-HuddleCluster maps this directly to server scheduling:
-
-- **Inner ring** — active servers handling requests (warm)
-- **Outer ring** — resting servers recovering from load (cool)
-- **Temperature** — a composite EMA score derived from relative latency anomaly, CPU, memory, connections, and error rate
-- **Rotation** — overheated servers evict to outer ring; cooled servers return to inner ring automatically
-
-The key innovation is **relative latency anomaly scoring**: instead of comparing a server's
-latency to an absolute threshold, HuddleCluster compares each server to the cluster-wide
-median. A server 3x slower than its peers is evicted regardless of whether the baseline is
-10 ms or 300 ms.
+<p align="center">
+  <strong>Penguin-inspired self-organizing load balancer with adaptive thermal eviction.</strong>
+</p>
 
 ---
 
-## Benchmark Results
+Emperor Penguins survive Antarctic blizzards without any central coordinator — each bird follows one rule: if you're cold, push inward; if you're warm, drift outward. The huddle self-organizes.
 
-### Simulated Benchmark (10 trials, mean +/- std, Welch's t-test)
-
-| Scenario / Metric | Round Robin | Least Conn | HuddleCluster | p-value |
-|---|---|---|---|---|
-| **Normal Load** | | | | |
-| P50 (ms) | 21.5 +/- 0.2 | 21.2 +/- 0.3 | 21.0 +/- 0.2 | 0.000* |
-| P95 (ms) | 29.6 +/- 0.3 | 28.8 +/- 0.4 | 28.6 +/- 0.6 | 0.001* |
-| Avg (ms) | 21.4 +/- 0.1 | 21.1 +/- 0.2 | 21.0 +/- 0.2 | 0.000* |
-| Fairness (Gini) | 0.000 | 0.067 | **0.000** | -- |
-| **Slow Server (5x at halfway)** | | | | |
-| P95 (ms) | 63.2 +/- 1.0 | 61.7 +/- 1.1 | 55.1 +/- 10.6 | 0.039* |
-| Avg (ms) | 20.1 +/- 0.2 | 19.7 +/- 0.2 | 19.6 +/- 0.4 | 0.002* |
-| **Server Failure (crash at halfway)** | | | | |
-| P95 (ms) | 500.0 +/- 0.0 | 500.0 +/- 0.0 | **23.9 +/- 0.5** | 0.000* |
-| Avg (ms) | 53.4 +/- 0.2 | 229.7 +/- 1.4 | **29.7 +/- 0.1** | 0.000* |
-
-*statistically significant (p < 0.05)*
-
-### Real HTTP Benchmark (6 FastAPI servers, loopback)
-
-| Scenario / Metric | Round Robin | Least Conn | HuddleCluster | vs RR |
-|---|---|---|---|---|
-| **Normal Load** | | | | |
-| P95 (ms) | 88.6 | 85.3 | 74.3 | +16.2% |
-| Avg (ms) | 51.8 | 48.3 | 46.1 | +11.0% |
-| **Slow Server (5x)** | | | | |
-| Avg (ms) | 55.2 | 52.1 | 53.4 | +3.4% |
-| **Server Failure** | | | | |
-| P95 (ms) | 5,026.9 | 5,027.9 | **85.6** | +98.3% |
-| Avg (ms) | 429.7 | 414.0 | **181.5** | +57.7% |
-
-### Industry Baseline (NGINX vs HuddleCluster, Docker)
-
-Containerised benchmark: 6 FastAPI upstream servers, Docker bridge network,
-NGINX round-robin and NGINX least-connections as baselines.
-
-| Scenario / Metric | NGINX RR | NGINX LC | HuddleCluster | vs NGINX RR |
-|---|---|---|---|---|
-| **Normal Load** | | | | |
-| P50 (ms) | 28.4 | 27.5 | **20.5** | +28.0% |
-| P95 (ms) | 55.1 | 39.3 | **33.4** | +39.4% |
-| Avg (ms) | 29.1 | 26.4 | **21.4** | +26.5% |
-| **Slow Server (5x)** | | | | |
-| P50 (ms) | 25.3 | 25.3 | **19.8** | +21.6% |
-| P95 (ms) | 38.9 | 42.8 | **33.6** | +13.6% |
-| Avg (ms) | 25.1 | 25.8 | **20.5** | +18.4% |
-| **Server Failure** | | | | |
-| P95 (ms) | 45.9 | 41.9 | **29.7** | +35.3% |
-| Avg (ms) | 25.9 | 25.6 | **20.8** | +19.4% |
-
-Note: admin endpoint injection was not available in this Docker run
-(upstream servers on internal network only). Results reflect
-HuddleCluster's thermal rotation advantage without injected failures.
-
-```bash
-cd benchmarks/
-docker compose up -d --build
-python benchmark_industry.py
-docker compose down
-```
-
-### Overhead
-
-| Measurement | Value |
-|---|---|
-| RR get_server() | 0.277 us |
-| HC get_server() | 0.295 us (1.07x over RR) |
-| HC get_server() + record_latency() | 10.7 us |
-| Peak memory (20 servers) | 28.3 KB |
-| Slow-server detection speed | 36 requests avg (range 35-40) |
+HuddleCluster applies this directly to server scheduling. Servers that run hot rotate to an outer ring to cool down. Cooled servers rotate back in. No manual tuning. No fixed thresholds. The cluster finds its own equilibrium.
 
 ---
 
-## Quick Start
+## Install
 
 ```bash
 pip install huddle-cluster
-# with FastAPI integration:
-pip install "huddle-cluster[fastapi]"
-# with Redis backend:
-pip install "huddle-cluster[redis]"
-# with gRPC support:
-pip install "huddle-cluster[grpc]"
-# with Kubernetes discovery:
-pip install "huddle-cluster[kubernetes]"
-# with benchmark dependencies:
-pip install "huddle-cluster[benchmark]"
-# everything:
-pip install "huddle-cluster[fastapi,redis,grpc,kubernetes,simulation,benchmark]"
 ```
+
+Optional extras: `fastapi` · `redis` · `grpc` · `kubernetes`
+
+---
+
+## Single-instance
 
 ```python
 from huddle_cluster import create_cluster
-import time, requests
+import requests
 
 cluster = create_cluster([
-    ("s1", "10.0.0.1", 8080),
-    ("s2", "10.0.0.2", 8080),
-    ("s3", "10.0.0.3", 8080),
+    ("web-1", "10.0.0.1", 8080),
+    ("web-2", "10.0.0.2", 8080),
+    ("web-3", "10.0.0.3", 8080),
 ])
 cluster.start()
 
-# Route a request with latency feedback
-server = cluster.get_server()
-t0 = time.perf_counter()
-response = requests.get(f"http://{server.host}:{server.port}/api")
-cluster.record_latency(server, (time.perf_counter() - t0) * 1000)
-
-# Or use the context manager (auto-records latency)
 with cluster.get_server_context() as server:
     response = requests.get(f"http://{server.host}:{server.port}/api")
+```
 
+What the cluster reports at any point:
+
+```python
 print(cluster.health_report())
-cluster.stop()
-```
-
----
-
-## v1.3.0 Features
-
-### Weighted Server Capacity
-
-Servers with higher weight tolerate more load before eviction. Useful for
-heterogeneous clusters where some instances are larger than others.
-
-```python
-cluster = create_cluster([
-    ("s1", "10.0.0.1", 8080),          # weight=1.0 (default)
-    ("s2", "10.0.0.2", 8080, 2.0),     # weight=2.0 -- needs 2x heat to evict
-    ("s3", "10.0.0.3", 8080, 0.5),     # weight=0.5 -- evicts sooner
-])
-```
-
-### Cold Start Protection
-
-New servers warm up in the outer ring before handling traffic. Prevents
-request spikes on fresh instances that have not yet warmed their caches
-or JIT compilers.
-
-```python
-cluster = HuddleCluster(cold_start_sec=30.0)
-# Any server added will stay in outer ring for 30 seconds
-# regardless of force_inner=True
-```
-
-### Absolute Latency Floor
-
-Guards against majority degradation where the relative anomaly score breaks
-down (when the cluster median itself rises above acceptable levels).
-
-```python
-cluster = HuddleCluster(absolute_latency_floor_ms=500.0)
-# Any server with avg latency > 500ms is evicted regardless of relative score
-```
-
-### Adaptive Thresholds
-
-Heat and cool thresholds auto-adjust based on cluster P95 latency history.
-Thresholds loosen under sustained load (to avoid over-eviction) and tighten
-when the cluster is healthy (for faster anomaly detection).
-
-```python
-cluster = HuddleCluster(adaptive_thresholds=True)
-# heat_threshold and cool_threshold update automatically
-# Check current values via cluster.health_report()["heat_threshold"]
-```
-
-### Prometheus Metrics Exporter
-
-Expose cluster state as Prometheus metrics for Grafana dashboards.
-
-```python
-# FastAPI example
-from fastapi import FastAPI
-from fastapi.responses import PlainTextResponse
-
-app = FastAPI()
-
-@app.get("/metrics", response_class=PlainTextResponse)
-def metrics():
-    return cluster.prometheus_metrics()
-```
-
-Metrics exposed: `huddle_server_temperature`, `huddle_server_avg_latency_ms`,
-`huddle_server_anomaly_score`, `huddle_server_rotations_total`,
-`huddle_cluster_inner_count`, `huddle_cluster_fairness_gini`,
-`huddle_cluster_heat_threshold`, `huddle_cluster_p95_latency_ms`.
-
-### Gossip Protocol (Distributed Deployments)
-
-Share temperature state between multiple HuddleCluster instances via UDP
-multicast. Each node broadcasts its inner-ring server states; peers receive
-them as advisory signals.
-
-```python
-from huddle_cluster import GossipAgent, create_cluster
-
-agent   = GossipAgent(node_id="node-1", gossip_port=9999)
-cluster = create_cluster([...], gossip_agent=agent)
-cluster.start()
-
-# See peer states
-peers = agent.peer_states()
-# {"node-2": [{"id": "s0", "temp": 0.12, "avg_ms": 15.3, "pos": "inner"}]}
-```
-
-Note: gossip is best-effort UDP multicast. The cluster remains fully
-functional without gossip -- it is purely additive.
-
----
-
-## v1.4.0 Features
-
-### Persistent State
-
-Save and restore cluster temperature state across restarts. Prevents
-cold-start degradation after rolling deploys.
-
-```python
-cluster = HuddleCluster(
-    state_file="huddle_state.json",
-    checkpoint_interval_sec=30.0,   # auto-save every 30 seconds
-)
-cluster.start()
-# State is saved on stop() and restored on the next start()
-```
-
-### Webhook Alerting
-
-Receive HTTP POST notifications on eviction, promotion, or health events.
-
-```python
-cluster = HuddleCluster(
-    alert_webhooks=["https://hooks.example.com/cluster"],
-    alert_on={"eviction", "promotion", "health_fail"},
-    alert_headers={"Authorization": "Bearer my-token"},
-)
-```
-
-### Built-in HTTP Health Checker
-
-Probe upstream servers directly without an external health check loop.
-Failed servers are evicted automatically.
-
-```python
-cluster = HuddleCluster(
-    health_check_path="/health",
-    health_check_interval_sec=10.0,
-    health_check_timeout_sec=3.0,
-    health_check_failures=2,          # evict after 2 consecutive failures
-)
-```
-
-### Redis Backend (huddle_cluster_pkg)
-
-Share temperature state between HuddleCluster instances on different
-hosts so all nodes start with the same baseline after a rolling restart.
-
-```python
-pip install "huddle-cluster[redis]"
-```
-
-```python
-from huddle_cluster import create_cluster
-from huddle_cluster_pkg.backends_redis import RedisBackend
-
-backend = RedisBackend(url="redis://localhost:6379", key="huddle:state")
-cluster = create_cluster([...])
-cluster.start()
-
-backend.start_auto_sync(cluster, interval_sec=30.0)
-# ...
-backend.stop_auto_sync()
-```
-
-### gRPC Support (huddle_cluster_pkg)
-
-Thermal-aware gRPC channel routing using the same dual-ring algorithm.
-
-```python
-pip install "huddle-cluster[grpc]"
-```
-
-```python
-from huddle_cluster_pkg.grpc_cluster import create_grpc_cluster
-
-cluster = create_grpc_cluster([
-    ("s1", "10.0.0.1", 50051),
-    ("s2", "10.0.0.2", 50051),
-])
-cluster.start()
-
-with cluster.get_channel() as channel:
-    stub = MyService.Stub(channel)
-    response = stub.MyMethod(request)
-
-cluster.stop()
-```
-
-### Kubernetes Service Discovery (huddle_cluster_pkg)
-
-Auto-add and remove servers as Kubernetes pods come and go.
-
-```python
-pip install "huddle-cluster[kubernetes]"
-```
-
-```python
-from huddle_cluster import create_cluster
-from huddle_cluster_pkg.discovery_k8s import K8sDiscovery
-
-discovery = K8sDiscovery(
-    namespace="production",
-    label_selector="app=api-server",
-    port=8080,
-)
-cluster = create_cluster([], min_inner_size=1)
-cluster.start()
-discovery.start(cluster)
-# ...
-discovery.stop()
-cluster.stop()
-```
-
----
-
-
-## v2.0.0 — Cluster System
-
-> **Level 1: Basic Cluster System** — adds a true master/agent distributed
-> layer on top of the existing single-process HuddleCluster.
-
-### Starting a Master
-
-```bash
-# CLI (installed with pip install huddle-cluster)
-huddle-cluster master start --port 7070 --timeout 30
-```
-
-Or in Python:
-
-```python
-from huddle_cluster_pkg import MasterNode
-
-master = MasterNode(
-    host="0.0.0.0",
-    port=7070,
-    heartbeat_timeout_sec=30,
-    on_node_join=lambda n: print(f"joined:  {n.node_id}"),
-    on_node_leave=lambda n: print(f"left:    {n.node_id}"),
-    on_node_dead=lambda n: print(f"dead:    {n.node_id}"),
-)
-master.start()    # non-blocking
-```
-
-### Starting an Agent
-
-```bash
-# CLI
-huddle-cluster agent start \
-    --id web-01 \
-    --master http://192.168.1.10:7070 \
-    --port 8080 \
-    --interval 10 \
-    --meta region=us-east role=lb
-```
-
-Or in Python (optionally paired with a HuddleCluster):
-
-```python
-from huddle_cluster import create_cluster
-from huddle_cluster_pkg import AgentNode
-
-cluster = create_cluster(["s1:8001", "s2:8002", "s3:8003"])
-cluster.start()
-
-agent = AgentNode(
-    node_id="web-01",
-    master_url="http://192.168.1.10:7070",
-    port=8080,
-    cluster=cluster,                    # forwards live metrics to master
-    heartbeat_interval_sec=10,
-    metadata={"region": "us-east"},
-    on_master_unreachable=lambda: print("master is down"),
-    on_recovered=lambda: print("master is back"),
-)
-agent.start()
-```
-
-### CLI Reference
-
-| Command | Description |
-|---|---|
-| `huddle-cluster master start [--host] [--port] [--timeout] [--flap-window] [--flap-threshold] [--quarantine-recovery] [--purge-after]` | Start master node |
-| `huddle-cluster agent start --id --master --port [options]` | Start agent node |
-| `huddle-cluster nodes list [--master]` | List all registered nodes |
-| `huddle-cluster nodes status NODE_ID [--master]` | Inspect one node |
-| `huddle-cluster cluster status [--master]` | Cluster summary |
-| `huddle-cluster cluster health [--master]` | Quick health check (exit 1 if down) |
-
-### Master REST API
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/v1/health` | `{"status": "ok"}` |
-| `GET` | `/v1/openapi.json` | OpenAPI 3.0 spec for this whole API |
-| `GET` | `/v1/docs` | Interactive Swagger UI |
-| `GET` | `/v1/status` | Cluster summary (node counts, uptime, `api_version`) |
-| `GET` | `/v1/metrics` | Prometheus text exposition (cluster-wide) |
-| `GET` | `/v1/nodes` `?status=&limit=&offset=` | Filterable, paginated node list |
-| `GET` | `/v1/nodes/{id}` | Single node record |
-| `POST` | `/v1/nodes/join` | Agent enrollment |
-| `POST` | `/v1/nodes/{id}/heartbeat` | Heartbeat + metrics |
-| `DELETE` | `/v1/nodes/{id}` | Graceful departure |
-
-### Filtering, Pagination & OpenAPI Spec (Level 2)
-
-`GET /v1/nodes` supports query parameters for larger clusters:
-
-```bash
-curl "http://localhost:7070/v1/nodes?status=alive,quarantined&limit=20&offset=0"
-huddle-cluster nodes list --status dead --limit 10
 ```
 
 ```json
-{"nodes": [...], "total": 47, "limit": 20, "offset": 0}
-```
-
-`status` filters can be comma-separated (`alive`, `dead`, `quarantined`,
-`leaving`); an unrecognized value returns `400`. Results are sorted by
-`node_id`, so pagination stays stable across calls. A plain
-`GET /v1/nodes` with no query string behaves exactly as before — `total`,
-`limit`, and `offset` are additive, not breaking.
-
-The whole API is also described as a machine-readable spec:
-
-```bash
-huddle-cluster cluster openapi
-# or
-curl http://localhost:7070/v1/openapi.json
-```
-
-This never requires auth — the spec describes how auth works, so a client
-needs to read it before it can know how to authenticate.
-
-For browsing and trying the API interactively, open `/v1/docs` — a
-Swagger UI page rendered against the same spec. Because the spec declares
-the Bearer auth scheme, Swagger UI shows an "Authorize" button: paste an
-API key once and every "Try it out" call carries it automatically.
-
-```
-http://localhost:7070/v1/docs
-```
-
-### Web Dashboard (Level 2)
-
-A real-time cluster topology view, served directly by the master — no
-separate process, no build step:
-
-```bash
-huddle-cluster master start
-# Dashboard : http://localhost:7070/dashboard
-```
-
-It shows summary cards (alive/quarantined/dead counts), a cluster health
-pill, a small colored dot per node (a nod to the penguin-huddle metaphor),
-and a sortable table with each node's status, address, heartbeat count,
-last-seen time, and forwarded metrics. It auto-refreshes every 3 seconds
-by polling the same `/v1/status` and `/v1/nodes` endpoints any other
-client would use.
-
-The page itself loads with no credentials needed — it's a static shell —
-but if the master has `api_keys` configured (see below), its `fetch()`
-calls will get `401`/`403` until you enter a key in the field at the top
-of the page. That key is stored only in your own browser's `localStorage`
-and sent only back to this master.
-
-### Authentication & RBAC (Level 2)
-
-By default the master's API is open — no credentials needed, same as
-before this existed. To lock it down, pass `api_keys`:
-
-```python
-from huddle_cluster_pkg import MasterNode
-
-master = MasterNode(
-    port=7070,
-    api_keys={
-        "admin-secret-key":   "admin",    # can join/heartbeat/leave + read
-        "dashboard-view-key": "viewer",   # read-only: status/metrics/nodes
-    },
-)
-master.start()
-```
-
-```bash
-huddle-cluster master start --api-key admin-secret-key=admin --api-key dashboard-view-key=viewer
-```
-
-Every request then needs `Authorization: Bearer <key>` — except
-`GET /v1/health`, which is deliberately exempt so liveness probes don't
-need credentials. Agents authenticate the same way:
-
-```python
-agent = AgentNode(
-    node_id="web-01", master_url="http://master:7070", port=8080,
-    api_key="admin-secret-key",   # agents need an admin-role key
-)
-```
-
-```bash
-huddle-cluster agent start --id web-01 --master http://master:7070 --port 8080 --api-key admin-secret-key
-```
-
-The CLI's read commands (`nodes list`, `nodes status`, `cluster status`,
-`cluster metrics`) accept `--api-key` too. A missing/invalid key gets
-`401`; a valid key without enough permission (e.g. a viewer trying to
-join) gets `403` — both logged on the master side for visibility. An
-unrecognized role string is treated as no access rather than full access,
-so a typo in configuration fails closed.
-
-### Auto Recovery (Level 2)
-
-A node that dies and recovers repeatedly within a short window is not
-trusted immediately — it gets quarantined until it proves itself stable:
-
-```python
-from huddle_cluster_pkg import MasterNode
-
-master = MasterNode(
-    port=7070,
-    heartbeat_timeout_sec=30,
-    flap_window_sec=300,               # window for counting repeated deaths
-    flap_threshold=3,                  # deaths within window -> quarantine
-    quarantine_recovery_heartbeats=3,  # consecutive heartbeats to exit quarantine
-    purge_after_sec=3600,              # remove dead nodes after 1h (opt-in; None disables)
-    on_node_quarantined=lambda n: alert_ops(f"{n.node_id} is flapping"),
-    on_node_purged=lambda n: print(f"{n.node_id} purged from registry"),
-)
-master.start()
-```
-
-A quarantined node is excluded from `alive_nodes()` (so it won't be trusted
-for routing decisions) but keeps appearing in `nodes()` / `GET /v1/nodes`
-with `status: "quarantined"`, along with `death_count` and `recent_deaths`
-for visibility. The same flap check applies whether the node recovers via a
-heartbeat or via re-joining (a crash-looping agent is caught either way).
-Purge is disabled by default — set `purge_after_sec` explicitly to opt in,
-and keep it larger than `heartbeat_timeout_sec` (the master logs a warning
-otherwise).
-
-### Metrics & Monitoring (Level 2)
-
-The master exposes a single Prometheus scrape target for the whole cluster
-— no need to discover and poll every agent individually:
-
-```bash
-curl http://localhost:7070/v1/metrics
-# or
-huddle-cluster cluster metrics
-```
-
-```
-huddle_master_total_nodes 3
-huddle_master_alive_nodes 2
-huddle_master_quarantined_nodes 1
-huddle_node_up{node_id="web-01"} 1
-huddle_node_fairness_score{node_id="web-01"} 0.94
-```
-
-Per-node metrics that an agent actually forwards (e.g. `fairness_score`,
-`inner_servers`, from an attached HuddleCluster's own `health_report()`)
-only appear when present — a node that never reports a field is absent
-from that metric family rather than shown as zero.
-
-For threshold-based alerting on the cluster as a whole (separate from
-per-node dead/quarantine events), set `unhealthy_alive_ratio`:
-
-```python
-master = MasterNode(
-    port=7070,
-    unhealthy_alive_ratio=0.5,   # alert if under 50% of nodes are alive
-    on_cluster_unhealthy=lambda s: page_oncall(s),
-    on_cluster_recovered=lambda s: print("cluster back to healthy"),
-)
-```
-
-Each callback fires once per transition (not on every monitor tick), and
-the current state is visible via `status()["cluster_unhealthy"]` or the
-`huddle_master_unhealthy` gauge in `/v1/metrics`.
-
-### Behaviour Highlights
-
-- **Dead detection** — a node is marked `dead` if no heartbeat arrives within
-  `heartbeat_timeout_sec`; it auto-recovers to `alive` when heartbeats resume
-  (or to `quarantined` if it has been flapping — see Auto Recovery above)
-- **Auto-rejoin** — if the master restarts and loses registrations, each agent
-  re-registers itself within 3 × heartbeat_interval automatically
-- **Fast shutdown** — `master.stop()` and `agent.stop()` complete in < 100 ms
-
----
-
-## File Structure
-
-```
-HuddleCluster/
-|
-|-- huddle_cluster.py              # Core library v1.4.0 (zero runtime dependencies)
-|-- huddle_cluster.pyi             # Type stubs for IDE autocomplete (PEP 561)
-|-- __init__.py                    # Package exports
-|-- pyproject.toml                 # pip install support
-|-- requirements.txt               # Optional dependencies by feature
-|-- LICENSE
-|-- USAGE.md                       # Documentation 
-|
-|-- huddle_cluster_pkg/            # Optional extension modules (v1.4.0)
-|   |-- __init__.py
-|   |-- backends_redis.py          # Redis shared-state backend
-|   |-- grpc_cluster.py            # Thermal-aware gRPC channel routing
-|   |-- discovery_k8s.py           # Kubernetes pod auto-discovery
-|   |-- core.py                    # Shared internals
-|
-├── assets/
-│   └── logo.svg                   # LOGO
-|
-|-- benchmarks/
-|   |-- benchmark.py               # Simulated 4-scenario benchmark
-|   |-- benchmark_statistical.py   # 10-trial statistical benchmark with CI
-|   |-- benchmark_http.py          # Real HTTP benchmark (6 FastAPI servers)
-|   |-- benchmark_industry.py      # NGINX vs HuddleCluster (Docker)
-|   |-- upstream_server.py         # FastAPI upstream server
-|   |-- docker-compose.yml         # 6 upstream servers + 2 NGINX instances
-|   |-- nginx/
-|   |   |-- nginx_rr.conf          # NGINX round-robin config
-|   |   |-- nginx_lc.conf          # NGINX least-connections config
-|   |-- run_http_benchmark.bat     # Windows one-click runner
-|
-|-- tests/                         # 571 tests across 19 modules
-|   |-- test_rotation.py           # Rotation, eviction, feedback loop
-|   |-- test_fairness.py           # Fairness and Gini tests
-|   |-- test_stress.py             # Concurrent load tests
-|   |-- test_histogram.py          # Latency histogram and percentile tests
-|   |-- test_integration.py        # FastAPI end-to-end tests
-|   |-- test_admin_api.py          # Admin HTTP endpoint tests
-|   |-- test_dashboard.py          # Dashboard and SSE tests
-|   |-- test_alerting.py           # Webhook alerting tests
-|   |-- test_canary.py             # Canary / traffic ramp tests
-|   |-- test_draining.py           # Connection draining tests
-|   |-- test_health_checker.py     # Built-in HTTP health checker tests
-|   |-- test_persistent_state.py   # State save/load/checkpoint tests
-|   |-- test_retry.py              # request_with_retry tests
-|   |-- test_sticky_sessions.py    # Affinity / sticky session tests
-|   |-- test_redis_backend.py      # Redis backend tests (uses fakeredis mock)
-|   |-- test_grpc_cluster.py       # gRPC cluster tests (uses grpc mock)
-|   |-- test_k8s_discovery.py      # K8s discovery tests (uses k8s mock)
-|   |-- test_cluster_master.py     # MasterNode tests — 112 tests (v2.0.0)
-|   |-- test_cluster_agent.py      # AgentNode tests  — 32 tests (v2.0.0)
-|   |-- conftest.py                # Shared fixtures
-|
-|-- examples/
-|   |-- fastapi_example.py         # FastAPI reverse proxy integration
-|   |-- simulation.py              # Terminal simulation (requires rich)
-|   |-- dashboard_demo.py          # Live dashboard demo (open in browser)
-|   |-- HuddleSimulation.jsx       # React visual simulation
-|
-|-- docs/
-    |-- HuddleCluster.pdf              # Paper PDF
-    |-- HuddleCluster_arxiv.pdf        # Arxiv paper PDF
-    |-- HuddleCluster_arxiv.tex        # Arxiv tex file
-    |-- diagrams/
-        |-- architecture_diagram.png   # Dual-ring architecture
-        |-- temperature_lifecycle.png  # State machine + weight composition
-        |-- rotation_flowchart.png     # Rotation algorithm flowchart
-        |-- generate_diagrams.py       # Regenerate diagrams
+{
+  "inner_servers": ["web-1", "web-3"],
+  "outer_servers": ["web-2"],
+  "fairness_score": 0.94,
+  "rotation_count": 12,
+  "requests_per_sec": 847.3,
+  "cluster_health": "healthy"
+}
 ```
 
 ---
 
-## How It Works
+## Multi-node cluster
 
-### Temperature Formula
-
-```
-raw(s) = 0.70 x anomaly(s)     # relative latency vs cluster median
-       + 0.10 x cpu(s)          # CPU usage [0,1]
-       + 0.10 x conn(s)         # active connections / 1000, clamped [0,1]
-       + 0.05 x mem(s)          # memory usage [0,1]
-       + 0.05 x err(s)          # error rate [0,1]
-
-T(s) = alpha x raw(s) + (1 - alpha) x T(s)   [EMA, default alpha=0.60]
-```
-
-### Relative Latency Anomaly
-
-```
-anomaly(s) = clamp( (avg_ms(s) / median_ms(inner_ring) - 1) / 2,  0,  1 )
-```
-
-| Server / Cluster Median | Ratio | Anomaly Score | Cycles to eviction |
-|---|---|---|---|
-| 12 ms / 12 ms | 1.0x (normal) | 0.00 | Never |
-| 24 ms / 12 ms | 2.0x (warm) | 0.50 | ~8 cycles |
-| 36 ms / 12 ms | 3.0x (hot) | 1.00 | ~3 cycles |
-| 60 ms / 12 ms | 5.0x (degraded) | 1.00 (clamped) | ~3 cycles |
-
-### Rotation Rules
-
-1. **Eviction** — inner server with T >= 0.55 moves to outer ring. Capped at max(1, |inner|/3) per cycle (thundering-herd prevention).
-2. **Promotion** — coolest outer server with T <= 0.30 and sufficient dwell time moves to inner ring (flapping prevention).
-3. **Health eviction** — server with is_healthy=False is evicted immediately regardless of temperature.
-4. **Emergency fallback** — if inner ring drops below min_inner, the globally coolest server is promoted unconditionally.
-
-### Failure-Mode Bounds
-
-**Median robustness**: up to floor((n-1)/2) simultaneous server degradations can be
-detected correctly. If k >= n/2 servers degrade simultaneously, the median baseline rises
-and anomaly detection weakens — a documented boundary condition.
-
-**Oscillation bound**: a server cannot oscillate faster than
-`rotation_cooldown_sec + min_outer_dwell_sec` per cycle (default: 15 seconds minimum).
-EMA smoothing requires at least 20 consecutive anomalous readings before a healthy server
-(raw < 0.10) is evicted.
-
-**Worst-case eviction rate**: at most max(1, floor(|inner|/3)) evictions per rotation
-cycle. With default settings, the inner ring never drops below min_inner=2 active servers.
-
----
-
-## Configuration
-
-```python
-cluster = HuddleCluster(
-    heat_threshold             = 0.55,   # Evict above this temperature
-    cool_threshold             = 0.30,   # Promote below this temperature
-    min_inner_size             = 2,      # Minimum active servers
-    max_inner_size             = 5,      # Maximum active servers
-    rotation_cooldown_sec      = 5.0,    # Minimum seconds between evictions per server
-    min_outer_dwell_sec        = 10.0,   # Minimum rest time before re-entry
-    ema_alpha                  = 0.60,   # Temperature smoothing (higher = faster reaction)
-    # v1.3.0 parameters
-    absolute_latency_floor_ms  = None,   # Evict any server above this absolute latency
-    cold_start_sec             = 0.0,    # New servers warm up in outer ring for this long
-    adaptive_thresholds        = False,  # Auto-adjust thresholds from cluster P95 history
-    gossip_agent               = None,   # GossipAgent for distributed deployments
-    metrics_updater            = None,   # Optional: fn(server) -> updates server.metrics
-    on_rotation                = None,   # Optional: fn(RotationEvent) -> called on rotation
-    # v1.3.3 parameters
-    circuit_breaker_threshold  = 0.5,    # Fraction of failures to open circuit breaker
-    on_eviction                = None,   # Optional: fn(server, reason) -> called on eviction
-    request_timeout_ms         = None,   # Timeout threshold for dead-server detection
-    # v1.4.0 parameters
-    state_file                 = None,   # Path to JSON state file for persistence
-    checkpoint_interval_sec    = 0.0,    # Auto-save interval (0 = disabled)
-    alert_webhooks             = None,   # List of webhook URLs for event notifications
-    alert_on                   = None,   # Set of event types: "eviction", "promotion", "health_fail"
-    alert_headers              = None,   # Extra HTTP headers for webhook requests
-    alert_timeout_sec          = 5.0,    # Webhook request timeout
-    ws_drain_timeout_sec       = 0.0,    # Wait for WebSocket connections to close before eviction
-    health_check_path          = None,   # HTTP path to probe (e.g. "/health")
-    health_check_interval_sec  = 10.0,  # How often to probe each server
-    health_check_timeout_sec   = 3.0,   # Per-probe timeout
-    health_check_failures      = 2,      # Consecutive failures before eviction
-)
-```
-
-### Parameter Sensitivity (P95 ms, slow-server scenario)
-
-| heat_threshold \ alpha | alpha=0.3 | alpha=0.6 (default) | alpha=0.9 |
-|---|---|---|---|
-| 0.45 (aggressive) | 38.2 | 31.4 | 29.1 |
-| **0.55 (default)** | 52.3 | **32.0** | 30.8 |
-| 0.65 (conservative) | 74.1 | 58.6 | 41.2 |
-
-Default (heat=0.55, alpha=0.60) balances detection speed and eviction stability.
-
----
-
-## Running Tests
+Coordinate a fleet of hosts — each node runs its own HuddleCluster; the master tracks enrollment, heartbeats, and health.
 
 ```bash
-# Install test dependencies
-pip install -e ".[dev,fastapi]"
+# Start the coordinator
+huddle-cluster master start --port 7070
 
-# Run all 427 tests
-pytest tests/ -v
+# Enroll nodes on each host
+huddle-cluster agent start --id web-01 --master http://master:7070 --port 8080
 
-# Core tests only (no extra deps needed)
-pytest tests/test_rotation.py tests/test_fairness.py tests/test_stress.py tests/test_histogram.py -v
-
-# Extension tests (redis backend, grpc, k8s — all use mocks, no real services needed)
-pip install fakeredis
-pytest tests/test_redis_backend.py tests/test_grpc_cluster.py tests/test_k8s_discovery.py -v
+# Inspect from anywhere
+huddle-cluster nodes list
 ```
 
----
+```
+NODE ID                ADDRESS                STATUS       HB       LAST SEEN
+─────────────────────────────────────────────────────────────────────────────
+web-01                 10.0.0.1:8080          alive        142      0.8s ago
+web-02                 10.0.0.2:8080          alive        139      1.1s ago
+web-03                 10.0.0.3:8080          dead         41       34.2s ago
+```
 
-## Running Benchmarks
+Ask the scheduler which node to send the next workload to:
 
 ```bash
-cd benchmarks/
+curl http://master:7070/v1/scheduler/next
+```
 
-# Simulated (4 scenarios, ~2 min)
-python benchmark.py
+```json
+{ "ok": true, "node": { "node_id": "web-01", "address": "10.0.0.1", "port": 8080 } }
+```
 
-# Statistical (10 trials, p-values, CI, ~6 min)
-pip install scipy matplotlib numpy
-python benchmark_statistical.py
+Live topology and Prometheus metrics are built in:
 
-# Real HTTP (6 FastAPI servers, ~3 min)
-pip install fastapi uvicorn httpx matplotlib numpy
-python benchmark_http.py          # Linux/Mac
-run_http_benchmark.bat            # Windows
-
-# Industry baseline: NGINX vs HuddleCluster (requires Docker)
-docker compose up -d
-python benchmark_industry.py
-docker compose down
+```
+http://master:7070/dashboard      → real-time cluster topology
+http://master:7070/v1/metrics     → Prometheus scrape endpoint
+http://master:7070/v1/docs        → interactive API explorer (Swagger UI)
 ```
 
 ---
 
-## GitHub Actions
+## How it works
 
-Three workflows are included:
+| Concept | What it means |
+|---|---|
+| **Inner ring** | Active servers handling traffic right now |
+| **Outer ring** | Servers cooling down after a hot streak |
+| **Thermal score** | EMA of relative latency anomaly, CPU, memory, error rate |
+| **Rotation** | Overheated servers evict outward; cooled servers return inward |
+| **Relative anomaly** | Compared to the cluster median — adapts to any baseline automatically |
 
-**CI** (`ci.yml`) — runs on every push and pull request:
-- Unit tests on Python 3.10, 3.11, 3.12
-- Integration tests (FastAPI upstream servers)
-- Type stub syntax check
-- Package build verification
-
-**Publish** (`publish.yml`) — triggers on version tags (`v*.*.*`):
-- Runs full test suite
-- Builds wheel and sdist
-- Publishes to PyPI via Trusted Publishing (no API token needed)
-- Creates GitHub Release with changelog entry
-
-**Benchmark** (`benchmark.yml`) — manual trigger only:
-- Runs statistical benchmark with configurable trials
-- Uploads chart artifacts
-
-Setup PyPI Trusted Publishing:
-1. PyPI -> Your project -> Publishing -> Add publisher
-2. GitHub owner: `rahadbhuiya`, repo: `HuddleCluster`, workflow: `publish.yml`
+No server is permanently marked bad. Every server gets rest and returns.
 
 ---
 
-## Known Limitations
+## Performance
 
-- **Uniform burst load**: when all servers are equally stressed, relative anomaly scores are near zero and no eviction fires. Use `absolute_latency_floor_ms` as a secondary guard.
-- **Majority degradation**: if more than half the inner-ring servers degrade simultaneously, the median baseline rises. Use `absolute_latency_floor_ms` in this scenario.
-- **Single-process by default**: temperature state is not shared across hosts without the Redis backend (`huddle_cluster_pkg.backends_redis`) or the gossip protocol (`GossipAgent`).
-- **Loopback benchmarks**: all HTTP benchmarks use localhost. Wide-area production validation is future work.
+Under server failure, P95 latency stays under **86 ms** where NGINX round-robin reaches **5,027 ms** — a 58× reduction. Full methodology and results in the research paper below.
+
+---
+
+## Documentation
+
+| | |
+|---|---|
+| **Single-instance guide** | [`USAGE.md`](USAGE.md) |
+| **Cluster system** | [`docs/CLUSTER.md`](docs/CLUSTER.md) — MasterNode, Scheduler, RBAC, dashboard, API |
+| **API explorer** | `http://your-master:7070/v1/docs` (live, once the master is running) |
+| **Research paper** | [`docs/HuddleCluster.pdf`](docs/HuddleCluster.pdf) · [arXiv preprint](docs/HuddleCluster_arxiv.pdf) |
 
 ---
 
 ## Roadmap
 
-- [x] Latency feedback loop (record_latency, get_server_context) — v1.1.0
-- [x] Relative latency anomaly scoring (median baseline) — v1.2.0
-- [x] Inner-ring fairness metric (Gini) — v1.2.0
-- [x] Tunable EMA alpha — v1.2.0
-- [x] Statistical benchmark (10 trials, Welch's t-test, 95% CI) — v1.2.0
-- [x] Real HTTP benchmark (FastAPI upstream servers) — v1.2.0
-- [x] Industry baseline benchmark (NGINX, Docker) — v1.2.0
-- [x] Failure-mode bounds (median robustness, oscillation, eviction rate) — v1.2.0
-- [x] Adaptive thresholds (auto-adjust heat/cool from cluster P95 history) — v1.3.0
-- [x] Weighted server capacity (weight= param on Server/create_cluster) — v1.3.0
-- [x] Cold start protection (cold_start_sec= param) — v1.3.0
-- [x] Prometheus metrics exporter (cluster.prometheus_metrics()) — v1.3.0
-- [x] Distributed temperature sharing (GossipAgent, UDP multicast) — v1.3.0
-- [x] Absolute latency floor (absolute_latency_floor_ms= param) — v1.3.0
-- [x] Server tags/labels, on_eviction callback, throughput metrics — v1.3.3
-- [x] Circuit breaker, graceful shutdown, request_with_retry — v1.3.3
-- [x] Persistent state (state_file, checkpoint_interval_sec) — v1.4.0
-- [x] Webhook alerting (alert_webhooks, alert_on) — v1.4.0
-- [x] Built-in HTTP health checker (health_check_path) — v1.4.0
-- [x] WebSocket connection draining (ws_connection, ws_drain_timeout_sec) — v1.4.0
-- [x] Redis shared-state backend (huddle_cluster_pkg.backends_redis) — v1.4.0
-- [x] gRPC channel routing (huddle_cluster_pkg.grpc_cluster) — v1.4.0
-- [x] Kubernetes service discovery (huddle_cluster_pkg.discovery_k8s) — v1.4.0
-
-**Level 1 — Basic Cluster System (v2.0.0)**
-- [x] Dedicated MasterNode — HTTP REST coordinator, node registry — v2.0.0
-- [x] AgentNode — enrollment, heartbeat loop, graceful leave — v2.0.0
-- [x] Node join/leave protocol with re-join on master restart — v2.0.0
-- [x] Heartbeat monitoring with auto dead-detection and recovery — v2.0.0
-- [x] Node list with status, metrics, last-seen-ago — v2.0.0
-- [x] `huddle-cluster` CLI (master start, agent start, nodes list, cluster status) — v2.0.0
-
-**Level 2 — Production Ready — COMPLETE (6/6)**
-- [x] Auto recovery — flapping detection (quarantine) and stale-node purge — v2.1.0
-- [x] Web dashboard — real-time cluster topology view — v2.4.0
-- [x] RBAC / authentication — API key with admin/viewer roles — v2.3.0
-- [x] Monitoring — `unhealthy_alive_ratio` threshold + on_cluster_unhealthy/recovered — v2.2.0
-- [x] Metrics — `GET /v1/metrics` Prometheus exposition, per-node + cluster-wide — v2.2.0
-- [x] REST API — filtering/pagination on `/v1/nodes`, OpenAPI 3.0 spec — v2.5.0
-
-**Level 3 — Kubernetes / Swarm-grade (planned)**
-- [ ] Scheduler — place workloads on nodes based on thermal fitness
-- [ ] Auto scaling — scale node count based on load signals
-- [ ] Rolling updates — zero-downtime cluster upgrades
-- [ ] Service discovery — DNS + health-aware record publishing
-- [ ] High-availability master — Raft-based consensus, no SPOF
-- [ ] Multi-region support — cross-datacenter topology awareness
+- Thermal eviction, relative anomaly scoring, adaptive thresholds — v1.x
+- Redis backend, gRPC routing, Kubernetes discovery, Prometheus, webhooks — v1.4
+- Cluster system: MasterNode, AgentNode, CLI — v2.0
+- Auto recovery, RBAC, metrics, dashboard, OpenAPI + Swagger UI — v2.x
+- Cluster Scheduler — thermal-fitness workload placement — v3.0
+- Planned: auto scaling, rolling updates, service discovery, HA master, multi-region
 
 ---
 
@@ -951,16 +159,16 @@ Setup PyPI Trusted Publishing:
 Bhuiya, R. (2025). HuddleCluster: A Penguin-Inspired Self-Organizing Load Balancer
 with Adaptive Thermal Eviction. https://github.com/rahadbhuiya/HuddleCluster
 ```
+
 ```
-Bhuiya, Rahad (2026). HuddleCluster. figshare. Journal contribution. 
+Bhuiya, Rahad (2026). HuddleCluster. figshare. Journal contribution.
 https://doi.org/10.6084/m9.figshare.32397180
 ```
+
 ```
-Bhuiya. (2026). HuddleCluster. Zenodo. https://doi.org/10.5281/zenodo.20348019
+Bhuiya, Rahad (2026). HuddleCluster. Zenodo. https://doi.org/10.5281/zenodo.20348019
 ```
 
 ---
 
-## License
-
-MIT — see LICENSE.
+**Author:** Rahad Bhuiya &nbsp;·&nbsp; **License:** MIT

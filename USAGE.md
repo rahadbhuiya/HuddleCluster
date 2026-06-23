@@ -325,6 +325,194 @@ cluster.stop()
 
 ---
 
+## Weighted Server Capacity
+
+Servers with higher weight tolerate more load before eviction — useful when
+instances have different hardware specs.
+
+```python
+from huddle_cluster import create_cluster
+
+cluster = create_cluster([
+    ("web-1", "10.0.0.1", 8080),         # weight=1.0 (default)
+    ("web-2", "10.0.0.2", 8080, 2.0),    # weight=2.0 — needs 2× heat to evict
+    ("web-3", "10.0.0.3", 8080, 0.5),    # weight=0.5 — evicts at half the threshold
+])
+```
+
+---
+
+## Cold Start Protection
+
+New servers warm up in the outer ring for a fixed period before becoming
+eligible for inner-ring traffic. Prevents request spikes on instances that
+haven't warmed their caches or JIT compilers yet.
+
+```python
+from huddle_cluster import HuddleCluster
+
+cluster = HuddleCluster(cold_start_sec=30.0)
+cluster.start()
+# Any server added via add_server() stays in the outer ring for 30 seconds
+# regardless of load, then graduates to the inner ring normally.
+```
+
+---
+
+## Absolute Latency Floor
+
+Guards against majority degradation — when the cluster median itself rises
+above an acceptable level, relative anomaly scoring alone isn't enough.
+
+```python
+cluster = HuddleCluster(absolute_latency_floor_ms=500.0)
+# Any server whose rolling average latency exceeds 500 ms is evicted
+# regardless of how it compares to the rest of the cluster.
+```
+
+---
+
+## Adaptive Thresholds
+
+Heat and cool thresholds auto-adjust from the cluster's P95 latency history.
+Thresholds loosen under sustained load to avoid over-eviction, and tighten
+when the cluster is healthy for faster anomaly detection.
+
+```python
+cluster = HuddleCluster(adaptive_thresholds=True)
+```
+
+---
+
+## Server Tags
+
+Attach arbitrary metadata to servers. Tags appear in `health_report()`,
+Prometheus metric labels, and log output.
+
+```python
+from huddle_cluster import HuddleCluster, Server
+
+cluster = HuddleCluster()
+cluster.add_server(Server(
+    id="web-1", host="10.0.0.1", port=8080,
+    tags={"region": "us-east", "tier": "primary", "az": "1a"},
+))
+cluster.start()
+```
+
+---
+
+## Eviction Callback
+
+```python
+from huddle_cluster import HuddleCluster, EvictionReason
+
+def on_evicted(server, reason: EvictionReason):
+    print(f"{server.id} evicted — reason: {reason.value}")
+    # reason values: overheated | unhealthy | absolute_latency | manual
+
+cluster = HuddleCluster(on_eviction=on_evicted)
+```
+
+---
+
+## Circuit Breaker
+
+Servers with an error rate above the threshold are evicted immediately,
+independent of latency scoring.
+
+```python
+cluster = HuddleCluster(circuit_breaker_threshold=0.5)
+# Any server with error_rate > 0.5 (50%) is evicted on the next rotation tick.
+```
+
+---
+
+## Gossip Protocol
+
+Share temperature state across hosts over UDP multicast — no Redis or central
+broker required. Each `GossipAgent` broadcasts its cluster's current temperatures
+and merges what it receives from peers.
+
+```python
+from huddle_cluster import create_cluster, GossipAgent
+
+cluster = create_cluster([("s1", "10.0.0.1", 8080)])
+cluster.start()
+
+agent = GossipAgent(
+    node_id="host-1",
+    gossip_port=9999,
+    broadcast_interval=2.0,
+)
+agent.start(cluster)
+
+# On each peer host:
+# agent = GossipAgent(node_id="host-2", gossip_port=9999)
+# agent.start(cluster)
+
+# All agents on the same multicast group merge each other's state automatically.
+agent.stop()
+cluster.stop()
+```
+
+---
+
+## WebSocket Connection Draining
+
+When a server is evicted, the cluster waits for active WebSocket connections
+to finish before removing it from the ring.
+
+```python
+cluster = HuddleCluster(ws_drain_timeout_sec=10.0)
+cluster.start()
+
+# Track a WebSocket connection — the server won't be evicted until
+# the context manager exits (or the drain timeout is reached).
+with cluster.ws_connection(server) as server:
+    await websocket.send(data)
+    await websocket.recv()
+```
+
+---
+
+## Graceful Shutdown
+
+```python
+# Basic stop
+cluster.stop()
+
+# Wait up to 10 s for in-flight requests to finish before stopping.
+# When state_file is configured, current temperatures are saved to disk
+# so the next start() restores them.
+cluster.stop(drain_timeout_sec=10.0)
+```
+
+---
+
+## Performance Overhead
+
+The thermal scheduling layer adds less than 1 μs per request:
+
+| Operation | Time |
+|---|---|
+| `get_server()` — round-robin baseline | 0.277 μs |
+| `get_server()` — HuddleCluster | 0.295 μs |
+| `get_server()` + `record_latency()` | 10.7 μs |
+| Peak memory (20 servers) | 28.3 KB |
+| Slow-server detection speed | ~36 requests avg |
+
+---
+
+## Known Limitations
+
+- **Uniform burst load** — when all servers are equally stressed, relative anomaly scores are near zero and no eviction fires. Use `absolute_latency_floor_ms` as a secondary guard.
+- **Majority degradation** — if more than half the inner-ring servers degrade simultaneously, the cluster median itself rises. Use `absolute_latency_floor_ms` in this case.
+- **Single-process by default** — temperature state is not shared across hosts without the Redis backend (`RedisBackend`) or the Gossip protocol (`GossipAgent`).
+- **Loopback benchmarks** — all HTTP benchmarks use localhost. Wide-area production validation is future work.
+
+---
+
 ## All Public Imports
 
 ```python
