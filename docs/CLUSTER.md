@@ -54,6 +54,7 @@ master.start()
 | `GET` | `/v1/scheduler/next` `?affinity=` | viewer | Pick the best node |
 | `GET` | `/v1/scheduler/stats` | viewer | Heat map + placement counts |
 | `POST` | `/v1/scheduler/report` | admin | Record workload completion |
+| `GET` | `/v1/autoscaler/status` | viewer | Scale decision, history, cooldowns |
 | `GET` | `/dashboard` | none | Web topology dashboard |
 
 ---
@@ -168,6 +169,60 @@ master = MasterNode(
         prefer_alive=True,   # alive nodes always before quarantined
     ),
 )
+```
+
+---
+
+## Auto Scaler
+
+Monitors alive node count and scheduler heat, then fires callbacks when the cluster should grow or shrink. Wire the callbacks to your provisioning system — Kubernetes, Terraform, a cloud SDK, or a shell script. The autoscaler never provisions nodes itself.
+
+```python
+from huddle_cluster_pkg import MasterNode, ClusterScheduler, ClusterAutoScaler
+
+def add_nodes(delta):
+    print(f"Provisioning {delta} node(s)")   # call your infra API here
+
+def remove_nodes(delta):
+    print(f"Deprovisioning {delta} node(s)")
+
+autoscaler = ClusterAutoScaler(
+    min_nodes=2,
+    max_nodes=10,
+    scale_up_heat_threshold=0.7,    # avg heat > 70% → scale up
+    scale_down_heat_threshold=0.2,  # avg heat < 20% → scale down
+    scale_up_cooldown_sec=120,      # wait 2 min between scale-ups
+    scale_down_cooldown_sec=300,    # wait 5 min between scale-downs
+    scale_up_step=1,
+    scale_down_step=1,
+    on_scale_up=add_nodes,
+    on_scale_down=remove_nodes,
+)
+master = MasterNode(
+    port=7070,
+    scheduler=ClusterScheduler(),   # heat signals need a scheduler
+    autoscaler=autoscaler,
+)
+master.start()
+```
+
+Scale-up fires when: alive nodes < `min_nodes`, or avg heat > `scale_up_heat_threshold`.
+Scale-down fires when: alive nodes > `max_nodes`, or avg heat < `scale_down_heat_threshold` (and alive > `min_nodes`).
+
+Cooldowns prevent thrashing. The autoscaler works without a scheduler (node-count signals only), or alongside one for heat-based decisions too.
+
+```bash
+curl http://localhost:7070/v1/autoscaler/status
+```
+
+```json
+{
+  "min_nodes": 2, "max_nodes": 10,
+  "last_decision": "scale_up",
+  "last_reason": "avg_heat (0.82) > threshold (0.70)",
+  "scale_event_count": 3,
+  "history": [...]
+}
 ```
 
 ---
@@ -307,7 +362,7 @@ Auto recovery · Prometheus metrics · RBAC/auth · Web dashboard · REST API ex
 
 **Level 3 — Kubernetes/Swarm-grade (in progress)**
 - [x] Scheduler — thermal-fitness workload placement — v3.0.0
-- [ ] Auto scaling
+- [x] Auto scaling — ClusterAutoScaler with heat + node-count signals — v3.1.0
 - [ ] Rolling updates
 - [ ] Service discovery
 - [ ] High-availability master

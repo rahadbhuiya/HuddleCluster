@@ -149,7 +149,8 @@ Under server failure, P95 latency stays under **86 ms** where NGINX round-robin 
 - Cluster system: MasterNode, AgentNode, CLI — v2.0
 - Auto recovery, RBAC, metrics, dashboard, OpenAPI + Swagger UI — v2.x
 - Cluster Scheduler — thermal-fitness workload placement — v3.0
-- Planned: auto scaling, rolling updates, service discovery, HA master, multi-region
+- Cluster Auto Scaler — load-signal scale recommendations — v3.1
+- Planned: rolling updates, service discovery, HA master, multi-region
 
 ---
 

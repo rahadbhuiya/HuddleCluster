@@ -11,7 +11,7 @@ deployment.  It does NOT route traffic itself; instead it:
   - Exposes a REST API consumed by the CLI and external tooling
 
 Author : Rahad Bhuiya
-Version: 3.0.0
+Version: 3.1.0
 License: MIT
 """
 
@@ -129,6 +129,9 @@ class MasterNode:
         GET  /v1/scheduler/stats              → heat map and placement counts
         POST /v1/scheduler/report             → record workload completion
 
+    Auto Scaler (Level 3, optional — enabled by passing autoscaler=ClusterAutoScaler()):
+        GET  /v1/autoscaler/status            → current decision, cooldowns, event history
+
     Dashboard:
         GET /dashboard                        → cluster topology web UI
         (HTML page outside the /v1/ namespace; the page loads without auth,
@@ -163,6 +166,7 @@ class MasterNode:
         unhealthy_alive_ratio: Optional[float] = None,
         api_keys: Optional[Dict[str, str]] = None,
         scheduler: Optional[Any] = None,
+        autoscaler: Optional[Any] = None,
         on_node_join: Optional[Callable[[NodeRecord], None]] = None,
         on_node_leave: Optional[Callable[[NodeRecord], None]] = None,
         on_node_dead: Optional[Callable[[NodeRecord], None]] = None,
@@ -202,7 +206,8 @@ class MasterNode:
                         key[-4:] if len(key) >= 4 else key, role,
                     )
 
-        self._scheduler = scheduler
+        self._scheduler  = scheduler
+        self._autoscaler = autoscaler
 
         self._nodes: Dict[str, NodeRecord] = {}
         self._lock = threading.RLock()
@@ -245,6 +250,8 @@ class MasterNode:
         self._started_at = time.time()
         self._start_http()
         self._start_monitor()
+        if self._autoscaler is not None:
+            self._autoscaler.start(self)
         logger.info("MasterNode started on %s:%d (timeout=%.0fs)",
                     self._host, self._port, self._timeout)
 
@@ -253,6 +260,8 @@ class MasterNode:
         if not self._running:
             return
         self._running = False
+        if self._autoscaler is not None:
+            self._autoscaler.stop()
         if self._http:
             self._http.shutdown()
         if self._http_thread:
@@ -317,7 +326,8 @@ class MasterNode:
             "purge_after_sec": self._purge_after,
             "cluster_unhealthy": self._cluster_unhealthy,
             "unhealthy_alive_ratio": self._unhealthy_alive_ratio,
-            "scheduler": "enabled" if self._scheduler is not None else "disabled",
+            "scheduler":   "enabled" if self._scheduler  is not None else "disabled",
+            "autoscaler":  "enabled" if self._autoscaler is not None else "disabled",
         }
 
     def prometheus_metrics(self) -> str:
@@ -404,7 +414,7 @@ class MasterNode:
                 f'huddle_node_last_seen_seconds{{node_id="{n.node_id}"}} {n.last_seen_ago:.1f}'
             )
 
-        # ---- forwarded per-node metrics (optional — only if present) ---
+        #  forwarded per-node metrics (optional — only if present) 
 
         forwarded = {
             "fairness_score":   ("huddle_node_fairness_score",
@@ -1216,6 +1226,17 @@ setInterval(refresh, 3000);
                         })
                         return
                     self._send_json(200, master._scheduler.scheduler_stats())
+
+                elif path == f"{_API_V1}/autoscaler/status":
+                    if not self._check_auth("viewer"):
+                        return
+                    if master._autoscaler is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "autoscaler is not enabled on this master",
+                        })
+                        return
+                    self._send_json(200, master._autoscaler.status())
 
                 elif path == f"{_API_V1}/metrics":
                     if not self._check_auth("viewer"):

@@ -5,6 +5,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.1.0] - 2026-06-21
+
+### Added — Level 3: Kubernetes/Swarm-grade (in progress, 2/6)
+
+**Cluster Auto Scaler** (`huddle_cluster_pkg.cluster_autoscaler`)
+- New `ClusterAutoScaler` class: monitors alive node count and (optionally)
+  average scheduler heat, then fires `on_scale_up` / `on_scale_down`
+  callbacks — infrastructure-agnostic; wire to K8s, Terraform, cloud SDK,
+  or any provisioning system
+- Two scale-up signals: alive count below `min_nodes`, or average scheduler
+  heat above `scale_up_heat_threshold`
+- Two scale-down signals: alive count above `max_nodes`, or average heat
+  below `scale_down_heat_threshold` (when alive > min_nodes)
+- Independent cooldown periods (`scale_up_cooldown_sec`,
+  `scale_down_cooldown_sec`) prevent thrashing after each action
+- `scale_up_step` / `scale_down_step` — how many nodes to recommend per event
+- Full history (last 200 events), bounded in memory; `status()` returns
+  last 10 plus current decision and last action timestamps
+- `ClusterAutoScaler.evaluate()` is callable directly (without the
+  background loop) for testing and custom control loops
+- Works standalone (node-count signals only) or in combination with
+  `ClusterScheduler` (heat signals available when scheduler is attached)
+- Plug-in design: `MasterNode(autoscaler=ClusterAutoScaler(...))`;
+  default is disabled, backward-compatible
+- `MasterNode.status()` now reports `"autoscaler": "enabled"/"disabled"`
+- `MasterNode.start()` / `stop()` automatically start/stop the autoscaler
+- New REST endpoint: `GET /v1/autoscaler/status`
+- `ClusterAutoScaler` exported from `huddle_cluster_pkg` top-level
+
+**Tests** (`tests/test_cluster_autoscaler.py`, new file)
+- 5 constructor validation tests
+- 16 `evaluate()` unit tests (scale-up/down signals, cooldown, callbacks,
+  history bounding, step size)
+- 8 HTTP integration tests via `MasterNode`
+- 29 total new tests
+
+---
+
 ## [3.0.0] - 2026-06-21
 
 ### Added — Level 3: Kubernetes/Swarm-grade (in progress, 1/6)

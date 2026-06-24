@@ -17,6 +17,13 @@ Scheduler (v3.0.0)
                       GET /v1/scheduler/next, GET /v1/scheduler/stats, and
                       POST /v1/scheduler/report.
 
+Auto Scaler (v3.1.0)
+---------------------
+    ClusterAutoScaler  Load-signal-based scale recommendations.
+                       Pass autoscaler=ClusterAutoScaler() to MasterNode to enable
+                       GET /v1/autoscaler/status and automatic on_scale_up /
+                       on_scale_down callbacks.
+
 Third-party backends (optional, require extra dependencies)
 -----------------------------------------------------------
     RedisClusterBackend   Redis shared-state for multi-process deployments.
@@ -38,9 +45,10 @@ CLI
         huddle-cluster cluster health
 """
 
-from huddle_cluster_pkg.cluster_master    import MasterNode, NodeRecord
-from huddle_cluster_pkg.cluster_agent     import AgentNode
-from huddle_cluster_pkg.cluster_scheduler import ClusterScheduler
+from huddle_cluster_pkg.cluster_master      import MasterNode, NodeRecord
+from huddle_cluster_pkg.cluster_agent       import AgentNode
+from huddle_cluster_pkg.cluster_scheduler   import ClusterScheduler
+from huddle_cluster_pkg.cluster_autoscaler  import ClusterAutoScaler
 
 __all__ = [
     # Cluster management
@@ -49,4 +57,6 @@ __all__ = [
     "AgentNode",
     # Scheduler
     "ClusterScheduler",
+    # Auto Scaler
+    "ClusterAutoScaler",
 ]
