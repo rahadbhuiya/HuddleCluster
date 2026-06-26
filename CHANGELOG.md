@@ -5,6 +5,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.2.0] - 2026-06-22
+
+### Added — Level 3: Kubernetes/Swarm-grade (in progress, 3/6)
+
+**Rolling Updater** (`huddle_cluster_pkg.cluster_rolling_updater`)
+- New `ClusterRollingUpdater` class: orchestrates zero-downtime node upgrades
+  one batch at a time; infrastructure-agnostic — provide an `update_fn` and
+  wire it to SSH, Ansible, K8s, or any provisioning system
+- Per-batch algorithm: health gate check → call `update_fn` for each node in
+  the batch (in parallel) → wait up to `drain_timeout_sec` for each node to
+  send a heartbeat again before proceeding
+- `health_gate_ratio`: if alive ratio drops below threshold, rollout
+  auto-pauses and waits for the cluster to recover before proceeding
+- `batch_size`: number of nodes to update in parallel per wave
+- `update_order`: `"alive_first"` (default) or `"stable_first"` (fewest deaths first)
+- Full lifecycle control: `start_rollout()` / `pause()` / `resume()` /
+  `abort()` — all callable directly or via REST
+- Per-node outcomes tracked: `pending | updated | failed | skipped`, with
+  `started_at`, `ended_at`, and error message
+- Callbacks: `on_node_updated`, `on_node_failed`, `on_rollout_complete`
+- Plug-in design: `MasterNode(rolling_updater=ClusterRollingUpdater(...))`;
+  default is disabled, backward-compatible
+- `MasterNode.status()` now reports `"rolling_updater": "enabled"/"disabled"`
+- New REST endpoints: `POST /v1/rollout/start`, `GET /v1/rollout/status`,
+  `POST /v1/rollout/pause`, `POST /v1/rollout/resume`, `POST /v1/rollout/abort`
+- `ClusterRollingUpdater` exported from `huddle_cluster_pkg` top-level
+
+**Tests** (`tests/test_cluster_rolling_updater.py`, new file)
+- 5 constructor validation tests
+- 3 control-method unit tests
+- 16 HTTP integration tests covering start/pause/resume/abort, batch size,
+  sequential ordering, drain timeout, callbacks, progress counts, conflict handling
+- 24 total new tests
+
+---
+
 ## [3.1.0] - 2026-06-21
 
 ### Added — Level 3: Kubernetes/Swarm-grade (in progress, 2/6)

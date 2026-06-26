@@ -55,6 +55,11 @@ master.start()
 | `GET` | `/v1/scheduler/stats` | viewer | Heat map + placement counts |
 | `POST` | `/v1/scheduler/report` | admin | Record workload completion |
 | `GET` | `/v1/autoscaler/status` | viewer | Scale decision, history, cooldowns |
+| `POST` | `/v1/rollout/start` | admin | Start rolling update |
+| `GET` | `/v1/rollout/status` | viewer | Progress, phase, per-node outcomes |
+| `POST` | `/v1/rollout/pause` | admin | Pause after current batch |
+| `POST` | `/v1/rollout/resume` | admin | Resume paused rollout |
+| `POST` | `/v1/rollout/abort` | admin | Stop immediately |
 | `GET` | `/dashboard` | none | Web topology dashboard |
 
 ---
@@ -297,6 +302,68 @@ huddle-cluster cluster openapi [--master URL]
 
 ---
 
+## Rolling Updater
+
+Updates all cluster nodes one batch at a time with zero downtime. Provide an `update_fn` — the actual upgrade command — and the updater handles sequencing, health gating, and drain timing.
+
+```python
+from huddle_cluster_pkg import MasterNode, ClusterRollingUpdater
+import subprocess
+
+def upgrade(node):
+    # SSH in, pull new image, restart — whatever your infra needs
+    subprocess.run(
+        ["ansible-playbook", "upgrade.yml", f"--limit={node['address']}"],
+        check=True,
+    )
+
+updater = ClusterRollingUpdater(
+    update_fn=upgrade,
+    batch_size=1,           # one node at a time
+    drain_timeout_sec=60,   # wait up to 60s for node to come back healthy
+    health_gate_ratio=0.5,  # pause if < 50% of nodes are alive
+    update_order="alive_first",
+    on_node_updated=lambda nid: print(f"{nid} upgraded"),
+    on_node_failed=lambda nid, err: alert_ops(nid, err),
+    on_rollout_complete=lambda: close_incident(),
+)
+master = MasterNode(port=7070, rolling_updater=updater)
+master.start()
+```
+
+Trigger and control via REST:
+
+```bash
+# Kick off
+curl -X POST http://localhost:7070/v1/rollout/start
+
+# Check progress
+curl http://localhost:7070/v1/rollout/status
+```
+
+```json
+{
+  "phase": "running",
+  "total_nodes": 4, "nodes_done": 2, "nodes_remaining": 2,
+  "outcomes": {
+    "web-01": { "status": "updated", "started_at": 1720000010.1 },
+    "web-02": { "status": "updated", "started_at": 1720000071.3 },
+    "web-03": { "status": "pending" },
+    "web-04": { "status": "pending" }
+  }
+}
+```
+
+```bash
+curl -X POST http://localhost:7070/v1/rollout/pause
+curl -X POST http://localhost:7070/v1/rollout/resume
+curl -X POST http://localhost:7070/v1/rollout/abort   # stops now, no revert
+```
+
+Health gate: if the alive ratio falls below `health_gate_ratio` before a batch, the rollout pauses automatically and resumes once the cluster recovers — preventing a cascading failure during an upgrade.
+
+---
+
 ## Behaviour Highlights
 
 - **Dead detection** — a node is marked `dead` if no heartbeat arrives within `heartbeat_timeout_sec`. It auto-recovers to `alive` when heartbeats resume (or to `quarantined` if it has been flapping).
@@ -363,7 +430,7 @@ Auto recovery · Prometheus metrics · RBAC/auth · Web dashboard · REST API ex
 **Level 3 — Kubernetes/Swarm-grade (in progress)**
 - [x] Scheduler — thermal-fitness workload placement — v3.0.0
 - [x] Auto scaling — ClusterAutoScaler with heat + node-count signals — v3.1.0
-- [ ] Rolling updates
+- [x] Rolling updates — ClusterRollingUpdater with health gate — v3.2.0
 - [ ] Service discovery
 - [ ] High-availability master
 - [ ] Multi-region support

@@ -150,7 +150,8 @@ Under server failure, P95 latency stays under **86 ms** where NGINX round-robin 
 - Auto recovery, RBAC, metrics, dashboard, OpenAPI + Swagger UI — v2.x
 - Cluster Scheduler — thermal-fitness workload placement — v3.0
 - Cluster Auto Scaler — load-signal scale recommendations — v3.1
-- Planned: rolling updates, service discovery, HA master, multi-region
+- Rolling Updater — zero-downtime batch upgrades with health gate — v3.2
+- Planned: service discovery, HA master, multi-region
 
 ---
 

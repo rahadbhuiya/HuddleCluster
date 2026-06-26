@@ -11,7 +11,7 @@ deployment.  It does NOT route traffic itself; instead it:
   - Exposes a REST API consumed by the CLI and external tooling
 
 Author : Rahad Bhuiya
-Version: 3.1.0
+Version: 3.2.0
 License: MIT
 """
 
@@ -98,7 +98,6 @@ class NodeRecord:
 
 # MasterNode
 
-
 class MasterNode:
     """
     Central coordinator for a HuddleCluster deployment.
@@ -131,6 +130,13 @@ class MasterNode:
 
     Auto Scaler (Level 3, optional — enabled by passing autoscaler=ClusterAutoScaler()):
         GET  /v1/autoscaler/status            → current decision, cooldowns, event history
+
+    Rolling Updater (Level 3, optional — enabled by passing rolling_updater=ClusterRollingUpdater()):
+        POST /v1/rollout/start              → kick off a rolling update
+        GET  /v1/rollout/status             → progress, phase, per-node outcomes
+        POST /v1/rollout/pause              → pause after current batch
+        POST /v1/rollout/resume             → resume a paused rollout
+        POST /v1/rollout/abort              → stop immediately
 
     Dashboard:
         GET /dashboard                        → cluster topology web UI
@@ -167,6 +173,7 @@ class MasterNode:
         api_keys: Optional[Dict[str, str]] = None,
         scheduler: Optional[Any] = None,
         autoscaler: Optional[Any] = None,
+        rolling_updater: Optional[Any] = None,
         on_node_join: Optional[Callable[[NodeRecord], None]] = None,
         on_node_leave: Optional[Callable[[NodeRecord], None]] = None,
         on_node_dead: Optional[Callable[[NodeRecord], None]] = None,
@@ -206,8 +213,11 @@ class MasterNode:
                         key[-4:] if len(key) >= 4 else key, role,
                     )
 
-        self._scheduler  = scheduler
-        self._autoscaler = autoscaler
+        self._scheduler      = scheduler
+        self._autoscaler     = autoscaler
+        self._rolling_updater = rolling_updater
+        if rolling_updater is not None:
+            rolling_updater.attach(self)
 
         self._nodes: Dict[str, NodeRecord] = {}
         self._lock = threading.RLock()
@@ -326,8 +336,9 @@ class MasterNode:
             "purge_after_sec": self._purge_after,
             "cluster_unhealthy": self._cluster_unhealthy,
             "unhealthy_alive_ratio": self._unhealthy_alive_ratio,
-            "scheduler":   "enabled" if self._scheduler  is not None else "disabled",
-            "autoscaler":  "enabled" if self._autoscaler is not None else "disabled",
+            "scheduler":      "enabled" if self._scheduler       is not None else "disabled",
+            "autoscaler":     "enabled" if self._autoscaler      is not None else "disabled",
+            "rolling_updater":"enabled" if self._rolling_updater is not None else "disabled",
         }
 
     def prometheus_metrics(self) -> str:
@@ -414,7 +425,7 @@ class MasterNode:
                 f'huddle_node_last_seen_seconds{{node_id="{n.node_id}"}} {n.last_seen_ago:.1f}'
             )
 
-        #  forwarded per-node metrics (optional — only if present) 
+        # forwarded per-node metrics (optional — only if present) 
 
         forwarded = {
             "fairness_score":   ("huddle_node_fairness_score",
@@ -1238,6 +1249,17 @@ setInterval(refresh, 3000);
                         return
                     self._send_json(200, master._autoscaler.status())
 
+                elif path == f"{_API_V1}/rollout/status":
+                    if not self._check_auth("viewer"):
+                        return
+                    if master._rolling_updater is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "rolling_updater is not enabled on this master",
+                        })
+                        return
+                    self._send_json(200, master._rolling_updater.status())
+
                 elif path == f"{_API_V1}/metrics":
                     if not self._check_auth("viewer"):
                         return
@@ -1355,10 +1377,50 @@ setInterval(refresh, 3000);
                     )
                     self._send_json(200, {"ok": True, "recorded": node_id})
 
+                elif path in (
+                    f"{_API_V1}/rollout/start",
+                    f"{_API_V1}/rollout/pause",
+                    f"{_API_V1}/rollout/resume",
+                    f"{_API_V1}/rollout/abort",
+                ):
+                    if not self._check_auth("admin"):
+                        return
+                    if master._rolling_updater is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "rolling_updater is not enabled on this master",
+                        })
+                        return
+                    action = path.rsplit("/", 1)[-1]
+                    if action == "start":
+                        ok = master._rolling_updater.start_rollout()
+                        self._send_json(200 if ok else 409, {
+                            "ok": ok,
+                            "error": None if ok else "a rollout is already in progress",
+                        })
+                    elif action == "pause":
+                        ok = master._rolling_updater.pause()
+                        self._send_json(200 if ok else 409, {
+                            "ok": ok,
+                            "error": None if ok else "no running rollout to pause",
+                        })
+                    elif action == "resume":
+                        ok = master._rolling_updater.resume()
+                        self._send_json(200 if ok else 409, {
+                            "ok": ok,
+                            "error": None if ok else "no paused rollout to resume",
+                        })
+                    elif action == "abort":
+                        ok = master._rolling_updater.abort()
+                        self._send_json(200 if ok else 409, {
+                            "ok": ok,
+                            "error": None if ok else "no active rollout to abort",
+                        })
+
                 else:
                     self._send_json(404, {"ok": False, "error": "not found"})
 
-            #  DELETE 
+            #  DELETE
 
             def do_DELETE(self) -> None:
                 path = self.path.split("?")[0]
