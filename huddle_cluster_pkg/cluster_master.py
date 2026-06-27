@@ -11,7 +11,7 @@ deployment.  It does NOT route traffic itself; instead it:
   - Exposes a REST API consumed by the CLI and external tooling
 
 Author : Rahad Bhuiya
-Version: 3.2.0
+Version: 3.3.0
 License: MIT
 """
 
@@ -98,6 +98,7 @@ class NodeRecord:
 
 # MasterNode
 
+
 class MasterNode:
     """
     Central coordinator for a HuddleCluster deployment.
@@ -174,6 +175,7 @@ class MasterNode:
         scheduler: Optional[Any] = None,
         autoscaler: Optional[Any] = None,
         rolling_updater: Optional[Any] = None,
+        service_discovery: Optional[Any] = None,
         on_node_join: Optional[Callable[[NodeRecord], None]] = None,
         on_node_leave: Optional[Callable[[NodeRecord], None]] = None,
         on_node_dead: Optional[Callable[[NodeRecord], None]] = None,
@@ -213,9 +215,10 @@ class MasterNode:
                         key[-4:] if len(key) >= 4 else key, role,
                     )
 
-        self._scheduler      = scheduler
-        self._autoscaler     = autoscaler
-        self._rolling_updater = rolling_updater
+        self._scheduler          = scheduler
+        self._autoscaler         = autoscaler
+        self._rolling_updater    = rolling_updater
+        self._service_discovery  = service_discovery
         if rolling_updater is not None:
             rolling_updater.attach(self)
 
@@ -262,6 +265,8 @@ class MasterNode:
         self._start_monitor()
         if self._autoscaler is not None:
             self._autoscaler.start(self)
+        if self._service_discovery is not None:
+            self._service_discovery.attach(self)
         logger.info("MasterNode started on %s:%d (timeout=%.0fs)",
                     self._host, self._port, self._timeout)
 
@@ -272,6 +277,8 @@ class MasterNode:
         self._running = False
         if self._autoscaler is not None:
             self._autoscaler.stop()
+        if self._service_discovery is not None:
+            self._service_discovery.stop()
         if self._http:
             self._http.shutdown()
         if self._http_thread:
@@ -336,9 +343,10 @@ class MasterNode:
             "purge_after_sec": self._purge_after,
             "cluster_unhealthy": self._cluster_unhealthy,
             "unhealthy_alive_ratio": self._unhealthy_alive_ratio,
-            "scheduler":      "enabled" if self._scheduler       is not None else "disabled",
-            "autoscaler":     "enabled" if self._autoscaler      is not None else "disabled",
-            "rolling_updater":"enabled" if self._rolling_updater is not None else "disabled",
+            "scheduler":         "enabled" if self._scheduler          is not None else "disabled",
+            "autoscaler":        "enabled" if self._autoscaler         is not None else "disabled",
+            "rolling_updater":   "enabled" if self._rolling_updater    is not None else "disabled",
+            "service_discovery": "enabled" if self._service_discovery  is not None else "disabled",
         }
 
     def prometheus_metrics(self) -> str:
@@ -425,7 +433,7 @@ class MasterNode:
                 f'huddle_node_last_seen_seconds{{node_id="{n.node_id}"}} {n.last_seen_ago:.1f}'
             )
 
-        # forwarded per-node metrics (optional — only if present) 
+        #  forwarded per-node metrics (optional — only if present) 
 
         forwarded = {
             "fairness_score":   ("huddle_node_fairness_score",
@@ -1260,6 +1268,34 @@ setInterval(refresh, 3000);
                         return
                     self._send_json(200, master._rolling_updater.status())
 
+                elif path == f"{_API_V1}/discovery/services":
+                    if not self._check_auth("viewer"):
+                        return
+                    if master._service_discovery is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "service_discovery is not enabled on this master",
+                        })
+                        return
+                    self._send_json(200, master._service_discovery.summary())
+
+                elif re.match(rf"{_API_V1}/discovery/services/([^/]+)$", path):
+                    if not self._check_auth("viewer"):
+                        return
+                    if master._service_discovery is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "service_discovery is not enabled on this master",
+                        })
+                        return
+                    service = path.rsplit("/", 1)[-1]
+                    nodes = master._service_discovery.alive_nodes_for(service)
+                    self._send_json(200, {
+                        "service": service,
+                        "alive_count": len(nodes),
+                        "nodes": nodes,
+                    })
+
                 elif path == f"{_API_V1}/metrics":
                     if not self._check_auth("viewer"):
                         return
@@ -1417,10 +1453,33 @@ setInterval(refresh, 3000);
                             "error": None if ok else "no active rollout to abort",
                         })
 
+                elif path == f"{_API_V1}/discovery/announce":
+                    if not self._check_auth("admin"):
+                        return
+                    if master._service_discovery is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "service_discovery is not enabled on this master",
+                        })
+                        return
+                    body = self._read_json()
+                    if body is None:
+                        self._send_json(400, {"ok": False, "error": "invalid JSON"})
+                        return
+                    node_id = (body.get("node_id") or "").strip()
+                    service = (body.get("service")  or "").strip()
+                    if not node_id or not service:
+                        self._send_json(400, {"ok": False,
+                            "error": "node_id and service are required"})
+                        return
+                    master._service_discovery.announce(node_id, service)
+                    self._send_json(200, {"ok": True,
+                        "node_id": node_id, "service": service})
+
                 else:
                     self._send_json(404, {"ok": False, "error": "not found"})
 
-            #  DELETE
+            #  DELETE 
 
             def do_DELETE(self) -> None:
                 path = self.path.split("?")[0]
@@ -1431,6 +1490,27 @@ setInterval(refresh, 3000);
                     node_id = m.group(1)
                     result = master._handle_leave(node_id)
                     self._send_json(200 if result.get("ok") else 404, result)
+
+                elif re.match(
+                    rf"{_API_V1}/discovery/services/([^/]+)/([^/]+)$", path
+                ):
+                    if not self._check_auth("admin"):
+                        return
+                    if master._service_discovery is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "service_discovery is not enabled on this master",
+                        })
+                        return
+                    parts   = path.rsplit("/", 2)
+                    service = parts[-2]
+                    node_id = parts[-1]
+                    ok = master._service_discovery.deregister(node_id, service)
+                    self._send_json(200 if ok else 404, {
+                        "ok": ok,
+                        "error": None if ok else f"'{node_id}' not registered for '{service}'",
+                    })
+
                 else:
                     self._send_json(404, {"ok": False, "error": "not found"})
 
@@ -1741,7 +1821,7 @@ setInterval(refresh, 3000);
 
         return {"ok": True, "node_id": node_id, "action": "left"}
 
-    
+
     # Repr
     
 

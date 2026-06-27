@@ -151,7 +151,8 @@ Under server failure, P95 latency stays under **86 ms** where NGINX round-robin 
 - Cluster Scheduler — thermal-fitness workload placement — v3.0
 - Cluster Auto Scaler — load-signal scale recommendations — v3.1
 - Rolling Updater — zero-downtime batch upgrades with health gate — v3.2
-- Planned: service discovery, HA master, multi-region
+- Service Discovery — health-aware registry, metadata-driven, DNS responder — v3.3
+- Planned: HA master, multi-region
 
 ---
 

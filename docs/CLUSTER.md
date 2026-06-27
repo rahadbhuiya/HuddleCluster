@@ -60,6 +60,10 @@ master.start()
 | `POST` | `/v1/rollout/pause` | admin | Pause after current batch |
 | `POST` | `/v1/rollout/resume` | admin | Resume paused rollout |
 | `POST` | `/v1/rollout/abort` | admin | Stop immediately |
+| `GET` | `/v1/discovery/services` | viewer | All services + alive node counts |
+| `GET` | `/v1/discovery/services/{name}` | viewer | Alive nodes for one service |
+| `POST` | `/v1/discovery/announce` | admin | Node self-announces a service |
+| `DELETE` | `/v1/discovery/services/{name}/{node_id}` | admin | Deregister a node |
 | `GET` | `/dashboard` | none | Web topology dashboard |
 
 ---
@@ -364,6 +368,66 @@ Health gate: if the alive ratio falls below `health_gate_ratio` before a batch, 
 
 ---
 
+## Service Discovery
+
+Nodes advertise the services they provide via join metadata. The registry automatically excludes dead and quarantined nodes from results.
+
+```bash
+# Nodes announce via metadata at join time
+huddle-cluster agent start --id api-01 --port 8080 \
+    --meta services=api,internal-rpc
+
+# Or announce at runtime via REST
+curl -X POST http://localhost:7070/v1/discovery/announce \
+  -d '{"node_id": "api-01", "service": "api"}'
+```
+
+```python
+from huddle_cluster_pkg import MasterNode, ServiceDiscovery
+
+sd = ServiceDiscovery(
+    refresh_interval_sec=5.0,
+    dns_port=8053,              # optional built-in DNS responder
+    dns_domain="cluster.local",
+    on_service_up=lambda svc, nodes: print(f"{svc} up: {len(nodes)} node(s)"),
+    on_service_down=lambda svc: alert_ops(f"{svc} has no alive nodes"),
+)
+master = MasterNode(port=7070, service_discovery=sd)
+master.start()
+```
+
+Look up alive nodes for a service:
+
+```bash
+curl http://localhost:7070/v1/discovery/services/api
+```
+
+```json
+{
+  "service": "api",
+  "alive_count": 2,
+  "nodes": [
+    {"node_id": "api-01", "address": "10.0.0.1", "port": 8080},
+    {"node_id": "api-02", "address": "10.0.0.2", "port": 8080}
+  ]
+}
+```
+
+List all services with their alive counts:
+
+```bash
+curl http://localhost:7070/v1/discovery/services
+```
+
+Optional DNS: if `dns_port` is set, the registry answers A-record queries for `<service>.<dns_domain>` using alive node addresses (pure stdlib, no external deps):
+
+```bash
+dig @localhost -p 8053 api.cluster.local A
+# Returns A records for 10.0.0.1 and 10.0.0.2
+```
+
+---
+
 ## Behaviour Highlights
 
 - **Dead detection** — a node is marked `dead` if no heartbeat arrives within `heartbeat_timeout_sec`. It auto-recovers to `alive` when heartbeats resume (or to `quarantined` if it has been flapping).
@@ -431,6 +495,6 @@ Auto recovery · Prometheus metrics · RBAC/auth · Web dashboard · REST API ex
 - [x] Scheduler — thermal-fitness workload placement — v3.0.0
 - [x] Auto scaling — ClusterAutoScaler with heat + node-count signals — v3.1.0
 - [x] Rolling updates — ClusterRollingUpdater with health gate — v3.2.0
-- [ ] Service discovery
+- [x] Service discovery — health-aware registry, metadata-driven, DNS responder — v3.3.0
 - [ ] High-availability master
 - [ ] Multi-region support

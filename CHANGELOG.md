@@ -5,6 +5,41 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.3.0] - 2026-06-22
+
+### Added — Level 3: Kubernetes/Swarm-grade (in progress, 4/6)
+
+**Service Discovery** (`huddle_cluster_pkg.cluster_service_discovery`)
+- New `ServiceDiscovery` class: health-aware service registry that tracks
+  which alive nodes provide which named services
+- Nodes advertise services via join metadata (`"services": "api,web"` or a
+  list); the registry picks these up automatically on every refresh cycle
+- Runtime announcement: `POST /v1/discovery/announce` — nodes can register
+  at any time without restarting
+- Automatic health gating: dead and quarantined nodes are excluded from
+  `GET /v1/discovery/services/<name>` results without any manual step
+- `on_service_up(service, nodes)` fires when the first alive node for a
+  service appears; `on_service_down(service)` fires when the last one
+  disappears — suitable for alerting or DNS propagation hooks
+- Optional built-in DNS A-record responder (`dns_port` param): answers
+  queries for `<service>.<dns_domain>` (default `cluster.local`) using
+  alive node addresses — pure stdlib `socket`, no external deps
+- REST endpoints: `GET /v1/discovery/services`, `GET /v1/discovery/services/{name}`,
+  `POST /v1/discovery/announce`, `DELETE /v1/discovery/services/{name}/{node_id}`
+- `MasterNode.status()` now reports `"service_discovery": "enabled"/"disabled"`
+- Plug-in design: `MasterNode(service_discovery=ServiceDiscovery(...))`;
+  disabled by default, backward-compatible
+- `ServiceDiscovery` exported from `huddle_cluster_pkg` top-level
+
+**Tests** (`tests/test_cluster_service_discovery.py`, new file)
+- 7 unit tests (announce, deregister, normalisation, summary)
+- 14 HTTP integration tests (lookup, metadata refresh, dead-node exclusion,
+  deregister, callbacks, 400/404/503 error paths)
+- 2 DNS responder tests (A-record response, wrong-domain ignore)
+- 23 total new tests
+
+---
+
 ## [3.2.0] - 2026-06-22
 
 ### Added — Level 3: Kubernetes/Swarm-grade (in progress, 3/6)

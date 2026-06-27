@@ -45,13 +45,15 @@ CLI
         huddle-cluster cluster health
 """
 
-from huddle_cluster_pkg.cluster_master          import MasterNode, NodeRecord
-from huddle_cluster_pkg.cluster_agent           import AgentNode
-from huddle_cluster_pkg.cluster_scheduler       import ClusterScheduler
-from huddle_cluster_pkg.cluster_autoscaler      import ClusterAutoScaler
-from huddle_cluster_pkg.cluster_rolling_updater import ClusterRollingUpdater
+from huddle_cluster_pkg.cluster_master            import MasterNode, NodeRecord
+from huddle_cluster_pkg.cluster_agent             import AgentNode
+from huddle_cluster_pkg.cluster_scheduler         import ClusterScheduler
+from huddle_cluster_pkg.cluster_autoscaler        import ClusterAutoScaler
+from huddle_cluster_pkg.cluster_rolling_updater   import ClusterRollingUpdater
+from huddle_cluster_pkg.cluster_service_discovery import ServiceDiscovery
 
 __all__ = [
     "MasterNode", "NodeRecord", "AgentNode",
-    "ClusterScheduler", "ClusterAutoScaler", "ClusterRollingUpdater",
+    "ClusterScheduler", "ClusterAutoScaler",
+    "ClusterRollingUpdater", "ServiceDiscovery",
 ]
