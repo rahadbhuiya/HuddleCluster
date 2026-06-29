@@ -51,9 +51,10 @@ from huddle_cluster_pkg.cluster_scheduler         import ClusterScheduler
 from huddle_cluster_pkg.cluster_autoscaler        import ClusterAutoScaler
 from huddle_cluster_pkg.cluster_rolling_updater   import ClusterRollingUpdater
 from huddle_cluster_pkg.cluster_service_discovery import ServiceDiscovery
+from huddle_cluster_pkg.cluster_ha                import ClusterHA
 
 __all__ = [
     "MasterNode", "NodeRecord", "AgentNode",
     "ClusterScheduler", "ClusterAutoScaler",
-    "ClusterRollingUpdater", "ServiceDiscovery",
+    "ClusterRollingUpdater", "ServiceDiscovery", "ClusterHA",
 ]

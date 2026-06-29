@@ -11,7 +11,7 @@ deployment.  It does NOT route traffic itself; instead it:
   - Exposes a REST API consumed by the CLI and external tooling
 
 Author : Rahad Bhuiya
-Version: 3.3.0
+Version: 3.4.0
 License: MIT
 """
 
@@ -57,7 +57,6 @@ _ROLE_RANK: Dict[str, int] = {"viewer": 1, "admin": 2}
 
 def _role_satisfies(role: str, required: str) -> bool:
     return _ROLE_RANK.get(role, 0) >= _ROLE_RANK.get(required, 99)
-
 
 
 # NodeRecord
@@ -176,6 +175,7 @@ class MasterNode:
         autoscaler: Optional[Any] = None,
         rolling_updater: Optional[Any] = None,
         service_discovery: Optional[Any] = None,
+        ha: Optional[Any] = None,
         on_node_join: Optional[Callable[[NodeRecord], None]] = None,
         on_node_leave: Optional[Callable[[NodeRecord], None]] = None,
         on_node_dead: Optional[Callable[[NodeRecord], None]] = None,
@@ -219,6 +219,7 @@ class MasterNode:
         self._autoscaler         = autoscaler
         self._rolling_updater    = rolling_updater
         self._service_discovery  = service_discovery
+        self._ha                 = ha
         if rolling_updater is not None:
             rolling_updater.attach(self)
 
@@ -267,6 +268,9 @@ class MasterNode:
             self._autoscaler.start(self)
         if self._service_discovery is not None:
             self._service_discovery.attach(self)
+        if self._ha is not None:
+            self_url = f"http://{self._host}:{self._port}"
+            self._ha.attach(self, self_url)
         logger.info("MasterNode started on %s:%d (timeout=%.0fs)",
                     self._host, self._port, self._timeout)
 
@@ -279,6 +283,8 @@ class MasterNode:
             self._autoscaler.stop()
         if self._service_discovery is not None:
             self._service_discovery.stop()
+        if self._ha is not None:
+            self._ha.stop()
         if self._http:
             self._http.shutdown()
         if self._http_thread:
@@ -347,6 +353,7 @@ class MasterNode:
             "autoscaler":        "enabled" if self._autoscaler         is not None else "disabled",
             "rolling_updater":   "enabled" if self._rolling_updater    is not None else "disabled",
             "service_discovery": "enabled" if self._service_discovery  is not None else "disabled",
+            "ha":                self._ha.status() if self._ha is not None else "disabled",
         }
 
     def prometheus_metrics(self) -> str:
@@ -1125,6 +1132,30 @@ setInterval(refresh, 3000);
 
             #  helpers 
 
+            def _check_leader(self) -> bool:
+                """
+                If HA is enabled and this node is not the leader, send a
+                307 redirect with X-Leader-URL and return False so the
+                caller can short-circuit. Returns True if OK to proceed.
+                """
+                if master._ha is None or master._ha.is_leader():
+                    return True
+                leader_url = master._ha.leader_url()
+                body = json.dumps({
+                    "ok": False,
+                    "error": "not the leader — retry against the leader",
+                    "leader_url": leader_url,
+                }).encode()
+                self.send_response(307)
+                if leader_url:
+                    self.send_header("Location", leader_url + self.path)
+                    self.send_header("X-Leader-URL", leader_url)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return False
+
             def _send_json(self, code: int, body: Any) -> None:
                 data = json.dumps(body, indent=2).encode()
                 self.send_response(code)
@@ -1203,6 +1234,15 @@ setInterval(refresh, 3000);
 
                 elif path == f"{_API_V1}/openapi.json":
                     self._send_json(200, master.openapi_spec())   # never requires auth
+
+                elif path == f"{_API_V1}/ha/status":
+                    if master._ha is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "HA is not enabled on this master",
+                        })
+                        return
+                    self._send_json(200, master._ha.status())
 
                 elif path == f"{_API_V1}/docs":
                     self._send_text(200, master.swagger_html(),
@@ -1366,8 +1406,46 @@ setInterval(refresh, 3000);
             def do_POST(self) -> None:
                 path = self.path.split("?")[0]
 
-                if path == f"{_API_V1}/nodes/join":
+                # ── Raft RPC endpoints (no auth, no leader check) ────────
+                if path == f"{_API_V1}/ha/vote":
+                    if master._ha is None:
+                        self._send_json(503, {"ok": False,
+                            "error": "HA is not enabled"})
+                        return
+                    body = self._read_json()
+                    if body is None:
+                        self._send_json(400, {"ok": False, "error": "invalid JSON"})
+                        return
+                    result = master._ha.handle_vote_request(
+                        candidate_id=body.get("candidate_id", ""),
+                        candidate_term=int(body.get("candidate_term", 0)),
+                    )
+                    self._send_json(200, result)
+                    return
+
+                elif path == f"{_API_V1}/ha/sync":
+                    if master._ha is None:
+                        self._send_json(503, {"ok": False,
+                            "error": "HA is not enabled"})
+                        return
+                    body = self._read_json()
+                    if body is None:
+                        self._send_json(400, {"ok": False, "error": "invalid JSON"})
+                        return
+                    result = master._ha.handle_append_entries(
+                        leader_id=body.get("leader_id", ""),
+                        leader_url=body.get("leader_url", ""),
+                        term=int(body.get("term", 0)),
+                        state_snapshot=body.get("state_snapshot"),
+                    )
+                    self._send_json(200, result)
+                    return
+
+                #  All other POSTs are write operations — check leader 
+                elif path == f"{_API_V1}/nodes/join":
                     if not self._check_auth("admin"):
+                        return
+                    if not self._check_leader():
                         return
                     body = self._read_json()
                     if body is None:
@@ -1378,6 +1456,8 @@ setInterval(refresh, 3000);
 
                 elif re.match(rf"{_API_V1}/nodes/([^/]+)/heartbeat$", path):
                     if not self._check_auth("admin"):
+                        return
+                    if not self._check_leader():
                         return
                     body = self._read_json()
                     if body is None:
@@ -1486,6 +1566,8 @@ setInterval(refresh, 3000);
                 m = re.match(rf"{_API_V1}/nodes/([^/]+)$", path)
                 if m:
                     if not self._check_auth("admin"):
+                        return
+                    if not self._check_leader():
                         return
                     node_id = m.group(1)
                     result = master._handle_leave(node_id)
@@ -1821,7 +1903,7 @@ setInterval(refresh, 3000);
 
         return {"ok": True, "node_id": node_id, "action": "left"}
 
-
+    
     # Repr
     
 

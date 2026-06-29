@@ -12,7 +12,9 @@ import pytest
 from huddle_cluster_pkg.cluster_master import MasterNode, NodeRecord
 
 
+
 # Helpers
+
 
 def _free_port():
     import socket
@@ -1297,9 +1299,11 @@ class TestNodesFilteringAndPagination:
     def test_offset_skips_results(self, master):
         for i in range(5):
             self._join(master.port, f"off{i}")
-        full = _get(master.port, "/nodes")["nodes"]
+        full      = _get(master.port, "/nodes")["nodes"]
+        full_ids  = [n["node_id"] for n in full]
         offset_data = _get(master.port, "/nodes?offset=2")
-        assert offset_data["nodes"] == full[2:]
+        # Compare node_id order only — last_seen_ago_sec changes between calls
+        assert [n["node_id"] for n in offset_data["nodes"]] == full_ids[2:]
         assert offset_data["offset"] == 2
 
     def test_limit_and_offset_together(self, master):
@@ -1307,7 +1311,8 @@ class TestNodesFilteringAndPagination:
             self._join(master.port, f"page{i}")
         data = _get(master.port, "/nodes?limit=2&offset=2")
         full = _get(master.port, "/nodes")["nodes"]
-        assert data["nodes"] == full[2:4]
+        full_ids = [n["node_id"] for n in full]
+        assert [n["node_id"] for n in data["nodes"]] == full_ids[2:4]
 
     def test_limit_zero_returns_empty_but_valid(self, master):
         self._join(master.port, "lz1")

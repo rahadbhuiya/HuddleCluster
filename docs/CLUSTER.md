@@ -64,6 +64,9 @@ master.start()
 | `GET` | `/v1/discovery/services/{name}` | viewer | Alive nodes for one service |
 | `POST` | `/v1/discovery/announce` | admin | Node self-announces a service |
 | `DELETE` | `/v1/discovery/services/{name}/{node_id}` | admin | Deregister a node |
+| `GET` | `/v1/ha/status` | none | HA role, term, leader URL, peers |
+| `POST` | `/v1/ha/vote` | none | Raft RequestVote RPC (peer-to-peer) |
+| `POST` | `/v1/ha/sync` | none | Raft AppendEntries / state snapshot RPC |
 | `GET` | `/dashboard` | none | Web topology dashboard |
 
 ---
@@ -428,6 +431,63 @@ dig @localhost -p 8053 api.cluster.local A
 
 ---
 
+## High-Availability Master
+
+Run multiple masters with Raft-based leader election — no single point of failure.
+
+```python
+from huddle_cluster_pkg import MasterNode, ClusterHA
+
+# Master 1
+ha1 = ClusterHA(
+    node_id="master-1",
+    peers=["http://master-2:7071", "http://master-3:7072"],
+    election_timeout_sec=2.0,
+    heartbeat_interval_sec=0.5,
+    sync_interval_sec=1.0,
+)
+master1 = MasterNode(port=7070, ha=ha1)
+master1.start()
+```
+
+Each master runs independently. One is elected leader via Raft; the others become followers.
+
+```bash
+curl http://master-1:7070/v1/ha/status
+```
+
+```json
+{
+  "node_id": "master-1",
+  "role": "leader",
+  "term": 3,
+  "leader_id": "master-1",
+  "leader_url": "http://master-1:7070",
+  "peers": ["http://master-2:7071", "http://master-3:7072"],
+  "peer_count": 2
+}
+```
+
+**Leader writes, followers redirect.** Agents and clients that send writes (join, heartbeat, leave) to a follower get `HTTP 307` with `X-Leader-URL` and `{"leader_url": "..."}` in the body, so they can retry against the leader.
+
+**State replication.** The leader pushes a full registry snapshot to all followers every `sync_interval_sec`. Followers serve read requests (`GET /v1/nodes`, `GET /v1/status`, etc.) from their local cache.
+
+**Failover.** When the leader stops, followers detect the missing heartbeat after `election_timeout_sec` and hold a new election. A 3-node cluster tolerates 1 failure; a 5-node cluster tolerates 2. A 2-node cluster cannot tolerate any failure — this is correct Raft behaviour, not a limitation of HuddleCluster.
+
+```python
+# Useful defaults
+ClusterHA(
+    node_id="m1",
+    peers=["http://m2:7071"],
+    election_timeout_sec=2.0,    # randomised [2, 4]s to avoid split votes
+    heartbeat_interval_sec=0.5,  # leader heartbeat cadence
+    sync_interval_sec=1.0,       # how often to push state snapshots
+    request_timeout_sec=1.0,     # RPC call timeout
+)
+```
+
+---
+
 ## Behaviour Highlights
 
 - **Dead detection** — a node is marked `dead` if no heartbeat arrives within `heartbeat_timeout_sec`. It auto-recovers to `alive` when heartbeats resume (or to `quarantined` if it has been flapping).
@@ -496,5 +556,5 @@ Auto recovery · Prometheus metrics · RBAC/auth · Web dashboard · REST API ex
 - [x] Auto scaling — ClusterAutoScaler with heat + node-count signals — v3.1.0
 - [x] Rolling updates — ClusterRollingUpdater with health gate — v3.2.0
 - [x] Service discovery — health-aware registry, metadata-driven, DNS responder — v3.3.0
-- [ ] High-availability master
+- [x] High-availability master — simplified Raft leader election + state replication — v3.4.0
 - [ ] Multi-region support

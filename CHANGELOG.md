@@ -5,6 +5,53 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.4.0] - 2026-06-23
+
+### Added — Level 3: Kubernetes/Swarm-grade (in progress, 5/6)
+
+**High-Availability Master** (`huddle_cluster_pkg.cluster_ha`)
+- New `ClusterHA` class: simplified Raft consensus layer that wraps a
+  `MasterNode` and adds leader election + state replication so the cluster
+  coordinator has no single point of failure
+- Roles: `follower` (default), `candidate` (no heartbeat within timeout),
+  `leader` (won majority vote)
+- Election: randomised timeouts `[base, 2×base]` to avoid split votes;
+  `RequestVote` RPC contacts all peers and requires a majority; term
+  monotonically incremented on each new election
+- Heartbeat: leader sends periodic heartbeats to followers to prevent
+  spurious re-elections; `AppendEntries` RPC doubles as heartbeat
+- State replication: leader pushes full registry snapshots to followers
+  every `sync_interval_sec`; followers apply snapshots to their local
+  `MasterNode` registry so reads remain available cluster-wide
+- Write guard: follower returns `HTTP 307` with `X-Leader-URL` and
+  `{"leader_url": "..."}` body on all write requests (join, heartbeat,
+  leave, rollout start, etc.); read requests always served locally
+- Solo mode: `peers=[]` makes the node an instant leader with no peers
+  to contact — useful for development and single-host deployments
+- New REST endpoints (no auth required — Raft RPCs must be reachable
+  between peers without credentials):
+  `GET /v1/ha/status` — role, term, leader URL, peers;
+  `POST /v1/ha/vote` — RequestVote RPC;
+  `POST /v1/ha/sync` — AppendEntries / state snapshot
+- `MasterNode.status()` embeds the full `ClusterHA.status()` dict under
+  the `"ha"` key (or `"disabled"` when HA is not configured)
+- `MasterNode.start()` / `stop()` automatically attach/detach the HA layer
+- `ClusterHA` exported from `huddle_cluster_pkg` top-level
+- Note: 2-node clusters cannot elect a new leader after one node fails —
+  this is correct Raft behaviour (majority of 2 requires 2 votes);
+  use 3+ nodes for fault tolerance
+
+**Tests** (`tests/test_cluster_ha.py`, new file)
+- 4 constructor / initial-state unit tests
+- 8 Raft RPC unit tests (vote granting, term comparison, step-down,
+  append-entries, state snapshot)
+- 13 integration tests: solo leader, multi-master election, exactly-one-leader
+  invariant, leader/follower roles, state replication, follower redirect,
+  3-node failover (new leader after old stops), vote/sync RPC endpoints
+- 25 total new tests
+
+---
+
 ## [3.3.0] - 2026-06-22
 
 ### Added — Level 3: Kubernetes/Swarm-grade (in progress, 4/6)
