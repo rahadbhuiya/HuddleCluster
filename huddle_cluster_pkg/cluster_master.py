@@ -11,7 +11,7 @@ deployment.  It does NOT route traffic itself; instead it:
   - Exposes a REST API consumed by the CLI and external tooling
 
 Author : Rahad Bhuiya
-Version: 3.4.0
+Version: 3.5.0
 License: MIT
 """
 
@@ -57,6 +57,7 @@ _ROLE_RANK: Dict[str, int] = {"viewer": 1, "admin": 2}
 
 def _role_satisfies(role: str, required: str) -> bool:
     return _ROLE_RANK.get(role, 0) >= _ROLE_RANK.get(required, 99)
+
 
 
 # NodeRecord
@@ -176,6 +177,7 @@ class MasterNode:
         rolling_updater: Optional[Any] = None,
         service_discovery: Optional[Any] = None,
         ha: Optional[Any] = None,
+        multi_region: Optional[Any] = None,
         on_node_join: Optional[Callable[[NodeRecord], None]] = None,
         on_node_leave: Optional[Callable[[NodeRecord], None]] = None,
         on_node_dead: Optional[Callable[[NodeRecord], None]] = None,
@@ -220,6 +222,7 @@ class MasterNode:
         self._rolling_updater    = rolling_updater
         self._service_discovery  = service_discovery
         self._ha                 = ha
+        self._multi_region       = multi_region
         if rolling_updater is not None:
             rolling_updater.attach(self)
 
@@ -271,6 +274,8 @@ class MasterNode:
         if self._ha is not None:
             self_url = f"http://{self._host}:{self._port}"
             self._ha.attach(self, self_url)
+        if self._multi_region is not None:
+            self._multi_region.attach(self)
         logger.info("MasterNode started on %s:%d (timeout=%.0fs)",
                     self._host, self._port, self._timeout)
 
@@ -285,6 +290,8 @@ class MasterNode:
             self._service_discovery.stop()
         if self._ha is not None:
             self._ha.stop()
+        if self._multi_region is not None:
+            self._multi_region.stop()
         if self._http:
             self._http.shutdown()
         if self._http_thread:
@@ -354,6 +361,7 @@ class MasterNode:
             "rolling_updater":   "enabled" if self._rolling_updater    is not None else "disabled",
             "service_discovery": "enabled" if self._service_discovery  is not None else "disabled",
             "ha":                self._ha.status() if self._ha is not None else "disabled",
+            "multi_region":      "enabled" if self._multi_region is not None else "disabled",
         }
 
     def prometheus_metrics(self) -> str:
@@ -1336,6 +1344,34 @@ setInterval(refresh, 3000);
                         "nodes": nodes,
                     })
 
+                elif path == f"{_API_V1}/regions":
+                    if not self._check_auth("viewer"):
+                        return
+                    if master._multi_region is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "multi_region is not enabled on this master",
+                        })
+                        return
+                    self._send_json(200, master._multi_region.summary())
+
+                elif re.match(rf"{_API_V1}/regions/([^/]+)$", path):
+                    if not self._check_auth("viewer"):
+                        return
+                    if master._multi_region is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "multi_region is not enabled on this master",
+                        })
+                        return
+                    region = path.rsplit("/", 1)[-1]
+                    nodes  = master._multi_region.alive_nodes_for_region(region)
+                    self._send_json(200, {
+                        "region": region,
+                        "alive_count": len(nodes),
+                        "nodes": nodes,
+                    })
+
                 elif path == f"{_API_V1}/metrics":
                     if not self._check_auth("viewer"):
                         return
@@ -1406,7 +1442,7 @@ setInterval(refresh, 3000);
             def do_POST(self) -> None:
                 path = self.path.split("?")[0]
 
-                # ── Raft RPC endpoints (no auth, no leader check) ────────
+                #  Raft RPC endpoints (no auth, no leader check) 
                 if path == f"{_API_V1}/ha/vote":
                     if master._ha is None:
                         self._send_json(503, {"ok": False,
@@ -1555,6 +1591,29 @@ setInterval(refresh, 3000);
                     master._service_discovery.announce(node_id, service)
                     self._send_json(200, {"ok": True,
                         "node_id": node_id, "service": service})
+
+                elif path == f"{_API_V1}/regions/announce":
+                    if not self._check_auth("admin"):
+                        return
+                    if master._multi_region is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "multi_region is not enabled on this master",
+                        })
+                        return
+                    body = self._read_json()
+                    if body is None:
+                        self._send_json(400, {"ok": False, "error": "invalid JSON"})
+                        return
+                    node_id = (body.get("node_id") or "").strip()
+                    region  = (body.get("region")  or "").strip()
+                    if not node_id or not region:
+                        self._send_json(400, {"ok": False,
+                            "error": "node_id and region are required"})
+                        return
+                    master._multi_region.announce(node_id, region)
+                    self._send_json(200, {"ok": True,
+                        "node_id": node_id, "region": region})
 
                 else:
                     self._send_json(404, {"ok": False, "error": "not found"})

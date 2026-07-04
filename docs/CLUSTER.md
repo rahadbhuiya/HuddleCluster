@@ -67,6 +67,9 @@ master.start()
 | `GET` | `/v1/ha/status` | none | HA role, term, leader URL, peers |
 | `POST` | `/v1/ha/vote` | none | Raft RequestVote RPC (peer-to-peer) |
 | `POST` | `/v1/ha/sync` | none | Raft AppendEntries / state snapshot RPC |
+| `GET` | `/v1/regions` | viewer | All regions with alive-node counts |
+| `GET` | `/v1/regions/{name}` | viewer | Alive nodes in a specific region |
+| `POST` | `/v1/regions/announce` | admin | Node self-announces its region |
 | `GET` | `/dashboard` | none | Web topology dashboard |
 
 ---
@@ -488,6 +491,68 @@ ClusterHA(
 
 ---
 
+## Multi-Region
+
+Nodes declare their region via join metadata; the manager tracks which regions are alive and lets the scheduler prefer nearby nodes without ever dropping traffic if a region goes dark.
+
+```bash
+huddle-cluster agent start --id web-01 --port 8080 --meta region=us-east
+```
+
+```python
+from huddle_cluster_pkg import MasterNode, ClusterScheduler, MultiRegionManager
+
+mr = MultiRegionManager(
+    preferred_region="us-east",
+    fallback_to_global=True,   # use the whole cluster if us-east is empty
+    on_region_up=lambda r, nodes: print(f"{r} up: {len(nodes)} node(s)"),
+    on_region_down=lambda r: alert_ops(f"{r} has no alive nodes"),
+)
+master = MasterNode(
+    port=7070,
+    scheduler=ClusterScheduler(),
+    multi_region=mr,
+)
+master.start()
+```
+
+Region-aware placement, narrowing the scheduler's pool when possible:
+
+```python
+node = scheduler.pick(master.nodes(), preferred_region="us-east")
+# Returns a us-east node if any are alive; otherwise falls back to the
+# full cluster automatically — a regional outage degrades gracefully
+# rather than dropping requests.
+```
+
+Look up regions via REST:
+
+```bash
+curl http://localhost:7070/v1/regions
+curl http://localhost:7070/v1/regions/us-east
+```
+
+```json
+{
+  "region": "us-east",
+  "alive_count": 3,
+  "nodes": [
+    {"node_id": "web-01", "address": "10.0.1.1", "port": 8080},
+    {"node_id": "web-02", "address": "10.0.1.2", "port": 8080},
+    {"node_id": "web-03", "address": "10.0.1.3", "port": 8080}
+  ]
+}
+```
+
+Runtime announcement (no restart needed):
+
+```bash
+curl -X POST http://localhost:7070/v1/regions/announce \
+  -d '{"node_id": "web-04", "region": "eu-west"}'
+```
+
+---
+
 ## Behaviour Highlights
 
 - **Dead detection** — a node is marked `dead` if no heartbeat arrives within `heartbeat_timeout_sec`. It auto-recovers to `alive` when heartbeats resume (or to `quarantined` if it has been flapping).
@@ -557,4 +622,4 @@ Auto recovery · Prometheus metrics · RBAC/auth · Web dashboard · REST API ex
 - [x] Rolling updates — ClusterRollingUpdater with health gate — v3.2.0
 - [x] Service discovery — health-aware registry, metadata-driven, DNS responder — v3.3.0
 - [x] High-availability master — simplified Raft leader election + state replication — v3.4.0
-- [ ] Multi-region support
+- [x] Multi-region support — cross-datacenter topology, region-aware scheduling — v3.5.0

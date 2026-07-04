@@ -31,7 +31,9 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+
 # Fitness scoring
+
 
 def _node_fitness(node_dict: Dict[str, Any], now: float) -> float:
     """
@@ -153,12 +155,20 @@ class ClusterScheduler:
         self,
         nodes: List[Dict[str, Any]],
         affinity_key: Optional[str] = None,
+        preferred_region: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Return the single best node dict from ``nodes`` for the next workload.
 
         ``nodes`` is the list returned by ``MasterNode.nodes()`` — dicts with
         at minimum ``node_id``, ``address``, ``port``, ``status`` fields.
+        Each node's ``metadata`` dict may include a ``"region"`` key (set via
+        join metadata) for region-aware placement.
+
+        If ``preferred_region`` is given, the eligible pool is narrowed to
+        nodes whose metadata region matches (case-insensitive) — but only if
+        at least one such node is eligible; otherwise the full pool is used,
+        so traffic is never dropped just because a region is unavailable.
 
         Returns None if no eligible node exists.
         """
@@ -166,6 +176,16 @@ class ClusterScheduler:
         eligible = [n for n in nodes if n.get("status") not in ("dead", "leaving")]
         if not eligible:
             return None
+
+        if preferred_region:
+            target = preferred_region.strip().lower()
+            regional = [
+                n for n in eligible
+                if str((n.get("metadata") or {}).get("region", ""))
+                   .strip().lower() == target
+            ]
+            if regional:
+                eligible = regional
 
         with self._lock:
             # Sticky affinity: if we've seen this key before and that node

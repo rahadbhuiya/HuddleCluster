@@ -5,6 +5,55 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.5.0] - 2026-06-24
+
+### Added — Level 3: Kubernetes/Swarm-grade — COMPLETE (6/6)
+
+**Multi-Region Support** (`huddle_cluster_pkg.cluster_multi_region`)
+- New `MultiRegionManager` class: cross-datacenter topology awareness built
+  on the same metadata-driven pattern as Service Discovery (v3.3.0)
+- Nodes declare their region via join metadata (`{"region": "us-east"}`);
+  the manager syncs from the master's registry on every refresh cycle
+- Health-aware: dead and quarantined nodes are automatically excluded
+  from per-region results, no manual step required
+- Runtime announcement: `POST /v1/regions/announce` — nodes can register
+  a region without restarting
+- `on_region_up(region, nodes)` / `on_region_down(region)` callbacks fire
+  on transitions, suitable for cross-region failover alerting
+- `preferred_nodes()` returns alive nodes in the preferred region, with
+  configurable fallback to the full cluster pool (`fallback_to_global`)
+  so traffic is never dropped just because a region is unavailable
+
+**Region-aware scheduling** (`huddle_cluster_pkg.cluster_scheduler`)
+- `ClusterScheduler.pick()` gained a `preferred_region` parameter: narrows
+  the eligible pool to nodes whose metadata region matches, falling back
+  to the full pool automatically when the region has no eligible nodes —
+  so a regional outage degrades gracefully rather than dropping requests
+- Fully backward compatible — omitting `preferred_region` behaves exactly
+  as before
+
+**REST endpoints**
+- `GET /v1/regions` — all regions with alive-node counts
+- `GET /v1/regions/{name}` — alive nodes in a specific region
+- `POST /v1/regions/announce` — node self-announces its region
+- `MasterNode.status()` now reports `"multi_region": "enabled"/"disabled"`
+- Plug-in design: `MasterNode(multi_region=MultiRegionManager(...))`;
+  disabled by default, backward-compatible
+- `MultiRegionManager` exported from `huddle_cluster_pkg` top-level
+
+**Tests** (`tests/test_cluster_multi_region.py`, new file)
+- 6 unit tests (announce, normalisation, dedup, summary, fallback)
+- 12 HTTP integration tests (lookup, metadata refresh, dead-node exclusion,
+  callbacks, 400/503 error paths)
+- 5 region-aware scheduling tests (preference, fallback, full-pool default)
+- 23 total new tests
+
+This completes Level 3 (Kubernetes/Swarm-grade) of the roadmap: Scheduler,
+Auto Scaling, Rolling Updates, Service Discovery, HA Master, and now
+Multi-Region — all six items shipped.
+
+---
+
 ## [3.4.0] - 2026-06-23
 
 ### Added — Level 3: Kubernetes/Swarm-grade (in progress, 5/6)

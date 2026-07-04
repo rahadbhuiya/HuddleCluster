@@ -153,7 +153,7 @@ Under server failure, P95 latency stays under **86 ms** where NGINX round-robin 
 - Rolling Updater — zero-downtime batch upgrades with health gate — v3.2
 - Service Discovery — health-aware registry, metadata-driven, DNS responder — v3.3
 - HA Master — simplified Raft leader election, state replication, write redirect — v3.4
-- Planned: multi-region
+- Multi-Region — cross-datacenter topology, region-aware scheduling — v3.5
 
 ---
 
