@@ -11,7 +11,7 @@ deployment.  It does NOT route traffic itself; instead it:
   - Exposes a REST API consumed by the CLI and external tooling
 
 Author : Rahad Bhuiya
-Version: 3.5.0
+Version: 4.0.0
 License: MIT
 """
 
@@ -178,6 +178,7 @@ class MasterNode:
         service_discovery: Optional[Any] = None,
         ha: Optional[Any] = None,
         multi_region: Optional[Any] = None,
+        circuit_breaker: Optional[Any] = None,
         on_node_join: Optional[Callable[[NodeRecord], None]] = None,
         on_node_leave: Optional[Callable[[NodeRecord], None]] = None,
         on_node_dead: Optional[Callable[[NodeRecord], None]] = None,
@@ -223,6 +224,7 @@ class MasterNode:
         self._service_discovery  = service_discovery
         self._ha                 = ha
         self._multi_region       = multi_region
+        self._circuit_breaker    = circuit_breaker
         if rolling_updater is not None:
             rolling_updater.attach(self)
 
@@ -276,6 +278,8 @@ class MasterNode:
             self._ha.attach(self, self_url)
         if self._multi_region is not None:
             self._multi_region.attach(self)
+        if self._circuit_breaker is not None:
+            self._circuit_breaker.attach(self)
         logger.info("MasterNode started on %s:%d (timeout=%.0fs)",
                     self._host, self._port, self._timeout)
 
@@ -292,6 +296,8 @@ class MasterNode:
             self._ha.stop()
         if self._multi_region is not None:
             self._multi_region.stop()
+        if self._circuit_breaker is not None:
+            self._circuit_breaker.stop()
         if self._http:
             self._http.shutdown()
         if self._http_thread:
@@ -361,7 +367,8 @@ class MasterNode:
             "rolling_updater":   "enabled" if self._rolling_updater    is not None else "disabled",
             "service_discovery": "enabled" if self._service_discovery  is not None else "disabled",
             "ha":                self._ha.status() if self._ha is not None else "disabled",
-            "multi_region":      "enabled" if self._multi_region is not None else "disabled",
+            "multi_region":      "enabled" if self._multi_region     is not None else "disabled",
+            "circuit_breaker":   "enabled" if self._circuit_breaker  is not None else "disabled",
         }
 
     def prometheus_metrics(self) -> str:
@@ -1372,6 +1379,36 @@ setInterval(refresh, 3000);
                         "nodes": nodes,
                     })
 
+                elif path == f"{_API_V1}/breakers":
+                    if not self._check_auth("viewer"):
+                        return
+                    if master._circuit_breaker is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "circuit_breaker is not enabled on this master",
+                        })
+                        return
+                    self._send_json(200, master._circuit_breaker.summary())
+
+                elif re.match(rf"{_API_V1}/breakers/([^/]+)$", path):
+                    if not self._check_auth("viewer"):
+                        return
+                    if master._circuit_breaker is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "circuit_breaker is not enabled on this master",
+                        })
+                        return
+                    node_id = path.rsplit("/", 1)[-1]
+                    state   = master._circuit_breaker.state_for(node_id)
+                    if state is None:
+                        self._send_json(404, {
+                            "ok": False,
+                            "error": f"no breaker state for '{node_id}'",
+                        })
+                    else:
+                        self._send_json(200, state)
+
                 elif path == f"{_API_V1}/metrics":
                     if not self._check_auth("viewer"):
                         return
@@ -1614,6 +1651,22 @@ setInterval(refresh, 3000);
                     master._multi_region.announce(node_id, region)
                     self._send_json(200, {"ok": True,
                         "node_id": node_id, "region": region})
+
+                elif re.match(rf"{_API_V1}/breakers/([^/]+)/reset$", path):
+                    if not self._check_auth("admin"):
+                        return
+                    if master._circuit_breaker is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "circuit_breaker is not enabled on this master",
+                        })
+                        return
+                    node_id = path.rsplit("/", 2)[-2]
+                    ok = master._circuit_breaker.reset(node_id)
+                    self._send_json(200 if ok else 404, {
+                        "ok": ok,
+                        "error": None if ok else f"no breaker state for '{node_id}'",
+                    })
 
                 else:
                     self._send_json(404, {"ok": False, "error": "not found"})

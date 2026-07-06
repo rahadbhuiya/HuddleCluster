@@ -154,6 +154,8 @@ Under server failure, P95 latency stays under **86 ms** where NGINX round-robin 
 - Service Discovery — health-aware registry, metadata-driven, DNS responder — v3.3
 - HA Master — simplified Raft leader election, state replication, write redirect — v3.4
 - Multi-Region — cross-datacenter topology, region-aware scheduling — v3.5
+- Cluster Circuit Breaker — error-rate-based automatic trip/reset, scheduler exclusion — v4.0
+- Planned (Level 4): rate limiter, canary deployment, observability
 
 ---
 

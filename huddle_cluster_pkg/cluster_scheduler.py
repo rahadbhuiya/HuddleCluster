@@ -87,7 +87,6 @@ def _node_fitness(node_dict: Dict[str, Any], now: float) -> float:
 
 # ClusterScheduler
 
-
 class ClusterScheduler:
     """
     Thermal-fitness scheduler for the HuddleCluster multi-node system.
@@ -124,6 +123,7 @@ class ClusterScheduler:
         self,
         cooldown_sec: float = 10.0,
         prefer_alive: bool = True,
+        circuit_breaker: Optional[Any] = None,
     ) -> None:
         """
         Args:
@@ -133,9 +133,13 @@ class ClusterScheduler:
             prefer_alive: If True (default), alive nodes are always preferred
                           over quarantined ones even if the quarantined node
                           has a higher raw score.
+            circuit_breaker: Optional ClusterCircuitBreaker instance.  When
+                             provided, nodes whose breaker is open are
+                             excluded from the eligible pool before scoring.
         """
-        self._cooldown = cooldown_sec
-        self._prefer_alive = prefer_alive
+        self._cooldown      = cooldown_sec
+        self._prefer_alive  = prefer_alive
+        self._circuit_breaker = circuit_breaker
 
         self._lock = threading.RLock()
         # heat[node_id] = (heat_value, last_update_time)
@@ -147,7 +151,7 @@ class ClusterScheduler:
         # completion reports: [(node_id, duration_ms, success)]
         self._reports: List[Dict[str, Any]] = []
 
-    
+
     # Public API
     
 
@@ -176,6 +180,15 @@ class ClusterScheduler:
         eligible = [n for n in nodes if n.get("status") not in ("dead", "leaving")]
         if not eligible:
             return None
+
+        # Exclude nodes whose circuit breaker is open
+        if self._circuit_breaker is not None:
+            eligible = [
+                n for n in eligible
+                if not self._circuit_breaker.is_open(n["node_id"])
+            ]
+            if not eligible:
+                return None
 
         if preferred_region:
             target = preferred_region.strip().lower()
@@ -245,12 +258,13 @@ class ClusterScheduler:
                 for nid in self._heat
             }
             return {
-                "cooldown_sec": self._cooldown,
-                "prefer_alive": self._prefer_alive,
-                "heat": heat_snapshot,
-                "workload_count": dict(self._workload_count),
+                "cooldown_sec":    self._cooldown,
+                "prefer_alive":    self._prefer_alive,
+                "circuit_breaker": "enabled" if self._circuit_breaker is not None else "disabled",
+                "heat":            heat_snapshot,
+                "workload_count":  dict(self._workload_count),
                 "affinity_bindings": len(self._affinity_map),
-                "report_count": len(self._reports),
+                "report_count":    len(self._reports),
             }
 
     

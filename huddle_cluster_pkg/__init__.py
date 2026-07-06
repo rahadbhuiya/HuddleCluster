@@ -53,10 +53,11 @@ from huddle_cluster_pkg.cluster_rolling_updater   import ClusterRollingUpdater
 from huddle_cluster_pkg.cluster_service_discovery import ServiceDiscovery
 from huddle_cluster_pkg.cluster_ha                import ClusterHA
 from huddle_cluster_pkg.cluster_multi_region      import MultiRegionManager
+from huddle_cluster_pkg.cluster_circuit_breaker   import ClusterCircuitBreaker
 
 __all__ = [
     "MasterNode", "NodeRecord", "AgentNode",
     "ClusterScheduler", "ClusterAutoScaler",
     "ClusterRollingUpdater", "ServiceDiscovery", "ClusterHA",
-    "MultiRegionManager",
+    "MultiRegionManager", "ClusterCircuitBreaker",
 ]

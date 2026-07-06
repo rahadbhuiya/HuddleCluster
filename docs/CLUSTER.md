@@ -70,6 +70,9 @@ master.start()
 | `GET` | `/v1/regions` | viewer | All regions with alive-node counts |
 | `GET` | `/v1/regions/{name}` | viewer | Alive nodes in a specific region |
 | `POST` | `/v1/regions/announce` | admin | Node self-announces its region |
+| `GET` | `/v1/breakers` | viewer | All circuit breaker states |
+| `GET` | `/v1/breakers/{node_id}` | viewer | Single node breaker state |
+| `POST` | `/v1/breakers/{node_id}/reset` | admin | Manually reset a breaker |
 | `GET` | `/dashboard` | none | Web topology dashboard |
 
 ---
@@ -550,6 +553,54 @@ Runtime announcement (no restart needed):
 curl -X POST http://localhost:7070/v1/regions/announce \
   -d '{"node_id": "web-04", "region": "eu-west"}'
 ```
+
+---
+
+## Cluster Circuit Breaker
+
+Tracks `error_rate` forwarded by agents via heartbeat metrics and automatically trips when a node exceeds the threshold. Tripped nodes are excluded from the scheduler's eligible pool before traffic reaches them.
+
+```python
+from huddle_cluster_pkg import MasterNode, ClusterScheduler, ClusterCircuitBreaker
+
+breaker   = ClusterCircuitBreaker(
+    trip_threshold=0.5,        # error_rate > 50% → trip
+    reset_timeout_sec=30.0,    # half-open probe after 30 s
+    on_trip=lambda nid, er: alert_ops(nid, er),
+    on_reset=lambda nid: resolve_incident(nid),
+)
+scheduler = ClusterScheduler(circuit_breaker=breaker)
+master    = MasterNode(port=7070, scheduler=scheduler, circuit_breaker=breaker)
+master.start()
+```
+
+Agents forward `error_rate` via their paired `HuddleCluster` instance metrics. Nodes that do not forward this metric are always treated as healthy — the breaker only acts on evidence.
+
+```bash
+# All breaker states
+curl http://localhost:7070/v1/breakers
+
+# Single node
+curl http://localhost:7070/v1/breakers/web-01
+
+# Manual reset after operator investigation
+curl -X POST http://localhost:7070/v1/breakers/web-01/reset
+```
+
+```json
+{
+  "trip_threshold": 0.5,
+  "open_breakers": 1,
+  "states": [
+    {"node_id": "web-01", "state": "open",
+     "last_error_rate": 0.82, "trip_count": 2},
+    {"node_id": "web-02", "state": "closed",
+     "last_error_rate": 0.12, "trip_count": 0}
+  ]
+}
+```
+
+States: `closed` (healthy) → `open` (tripped, excluded from scheduling) → `half_open` (probe window after timeout) → `closed` (auto-reset on recovery).
 
 ---
 

@@ -5,6 +5,57 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.0.0] - 2026-06-25
+
+### Added — Level 4: Observability & Control Plane (in progress, 1/4)
+
+**Cluster Circuit Breaker** (`huddle_cluster_pkg.cluster_circuit_breaker`)
+- New `ClusterCircuitBreaker` class: tracks per-node error rates forwarded
+  via heartbeat metrics and automatically trips when a node exceeds
+  `trip_threshold`; tripped nodes are excluded from the scheduler's
+  eligible pool so traffic reroutes before clients experience failures
+- Three-state model: `closed` (healthy), `open` (tripped, excluded),
+  `half-open` (probe window after `reset_timeout_sec`)
+- Only acts on nodes that actually forward `error_rate` in heartbeat
+  metrics — nodes without this metric are always treated as healthy
+  (circuit breaker only acts on evidence)
+- Auto-reset: when `error_rate` recovers below `trip_threshold` the
+  breaker closes automatically without manual intervention
+- Manual reset: `POST /v1/breakers/{node_id}/reset` and
+  `ClusterCircuitBreaker.reset()` for operator-driven recovery
+- `on_trip(node_id, error_rate)` / `on_reset(node_id)` callbacks
+- `ClusterScheduler` gained a `circuit_breaker=` parameter; when set,
+  `pick()` excludes all nodes whose breaker is open before scoring —
+  fully backward compatible when `circuit_breaker` is omitted
+- `ClusterScheduler.scheduler_stats()` now reports
+  `"circuit_breaker": "enabled"/"disabled"`
+- Plug-in design: `MasterNode(circuit_breaker=ClusterCircuitBreaker(...))`;
+  disabled by default, backward-compatible
+- `MasterNode.status()` reports `"circuit_breaker": "enabled"/"disabled"`
+- New REST endpoints:
+  `GET /v1/breakers` — all breaker states + open count;
+  `GET /v1/breakers/{node_id}` — single node state;
+  `POST /v1/breakers/{node_id}/reset` — manual reset
+- `ClusterCircuitBreaker` exported from `huddle_cluster_pkg` top-level
+- This is a major version bump (3.x → 4.0.0) marking the start of
+  Level 4 (Observability & Control Plane)
+
+**Tests** (`tests/test_cluster_circuit_breaker.py`, new file)
+- 5 constructor / validation tests
+- 7 evaluation tests (trip, no-trip, no-metric, callbacks, auto-reset,
+  half-open, trip count)
+- 4 manual reset tests
+- 4 scheduler exclusion tests
+- 9 HTTP integration tests
+- 29 total new tests
+
+**Level 4 roadmap (planned)**
+- Rate limiter — per-node token bucket rate limiting
+- Canary deployment — weight-based traffic splitting via scheduler
+- Observability — structured JSON logging, distributed trace IDs
+
+---
+
 ## [3.5.0] - 2026-06-24
 
 ### Added — Level 3: Kubernetes/Swarm-grade — COMPLETE (6/6)
