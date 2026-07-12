@@ -5,6 +5,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.1.0] - 2026-06-25
+
+### Added — Level 4: Observability & Control Plane (in progress, 2/4)
+
+**Cluster Rate Limiter** (`huddle_cluster_pkg.cluster_rate_limiter`)
+- New `ClusterRateLimiter` class: per-node token-bucket rate limiting.
+  Each node gets its own bucket with configurable capacity (max burst) and
+  refill rate (sustained throughput).  When a node's bucket is empty the
+  scheduler skips it and picks the next best eligible node instead, so
+  burst traffic is spread across the cluster rather than hammering one node.
+- Token bucket algorithm: continuous refill at `refill_rate` tokens/second,
+  capped at `capacity`; `consume()` deducts 1 token per scheduler pick.
+- Buckets are created lazily on first use; nodes that have never been
+  picked have a full bucket.
+- `is_rate_limited(node_id)` — True when fewer than 1 token remains.
+- `reset(node_id)` — operator-driven refill to capacity.
+- `on_rate_limited` callback fires when a node's bucket first empties.
+- `ClusterScheduler` gained a `rate_limiter=` parameter; when set,
+  rate-limited nodes are excluded from `pick()` before scoring.
+  Fully backward compatible — omitting `rate_limiter` behaves as before.
+- `ClusterScheduler.scheduler_stats()` reports
+  `"rate_limiter": "enabled"/"disabled"`.
+- Plug-in design: `MasterNode(rate_limiter=ClusterRateLimiter(...))`;
+  disabled by default, backward-compatible.
+- `MasterNode.status()` reports `"rate_limiter": "enabled"/"disabled"`.
+- New REST endpoints:
+  `GET /v1/ratelimits` — all bucket states + rate-limited count;
+  `GET /v1/ratelimits/{node_id}` — single node bucket;
+  `POST /v1/ratelimits/{node_id}/reset` — refill to capacity.
+- `ClusterRateLimiter` exported from `huddle_cluster_pkg` top-level.
+
+**Tests** (`tests/test_cluster_rate_limiter.py`, new file)
+- 7 `TokenBucket` unit tests (consume, refill, cap, fill, to_dict)
+- 9 `ClusterRateLimiter` unit tests (init, consume, callback, reset,
+  per-node independence, summary)
+- 5 scheduler exclusion tests
+- 9 HTTP integration tests
+- 35 total new tests
+
+---
+
 ## [4.0.0] - 2026-06-25
 
 ### Added — Level 4: Observability & Control Plane (in progress, 1/4)

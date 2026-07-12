@@ -87,6 +87,7 @@ def _node_fitness(node_dict: Dict[str, Any], now: float) -> float:
 
 # ClusterScheduler
 
+
 class ClusterScheduler:
     """
     Thermal-fitness scheduler for the HuddleCluster multi-node system.
@@ -124,22 +125,21 @@ class ClusterScheduler:
         cooldown_sec: float = 10.0,
         prefer_alive: bool = True,
         circuit_breaker: Optional[Any] = None,
+        rate_limiter: Optional[Any] = None,
     ) -> None:
         """
         Args:
-            cooldown_sec: Half-life in seconds for heat decay.  After this
-                          many seconds without being selected a node's heat
-                          drops to 50 % of its last value.
-            prefer_alive: If True (default), alive nodes are always preferred
-                          over quarantined ones even if the quarantined node
-                          has a higher raw score.
-            circuit_breaker: Optional ClusterCircuitBreaker instance.  When
-                             provided, nodes whose breaker is open are
-                             excluded from the eligible pool before scoring.
+            cooldown_sec:    Heat half-life in seconds.
+            prefer_alive:    Alive nodes preferred over quarantined ones.
+            circuit_breaker: Optional ClusterCircuitBreaker; tripped nodes
+                             are excluded from the eligible pool.
+            rate_limiter:    Optional ClusterRateLimiter; rate-limited nodes
+                             are excluded from the eligible pool.
         """
-        self._cooldown      = cooldown_sec
-        self._prefer_alive  = prefer_alive
+        self._cooldown        = cooldown_sec
+        self._prefer_alive    = prefer_alive
         self._circuit_breaker = circuit_breaker
+        self._rate_limiter    = rate_limiter
 
         self._lock = threading.RLock()
         # heat[node_id] = (heat_value, last_update_time)
@@ -151,7 +151,7 @@ class ClusterScheduler:
         # completion reports: [(node_id, duration_ms, success)]
         self._reports: List[Dict[str, Any]] = []
 
-
+    
     # Public API
     
 
@@ -190,6 +190,15 @@ class ClusterScheduler:
             if not eligible:
                 return None
 
+        # Exclude nodes that are currently rate-limited
+        if self._rate_limiter is not None:
+            eligible = [
+                n for n in eligible
+                if not self._rate_limiter.is_rate_limited(n["node_id"])
+            ]
+            if not eligible:
+                return None
+
         if preferred_region:
             target = preferred_region.strip().lower()
             regional = [
@@ -221,6 +230,8 @@ class ClusterScheduler:
             node_id = chosen["node_id"]
             self._apply_heat(node_id, now)
             self._workload_count[node_id] = self._workload_count.get(node_id, 0) + 1
+            if self._rate_limiter is not None:
+                self._rate_limiter.consume(node_id)
 
             if affinity_key is not None:
                 self._affinity_map[affinity_key] = node_id
@@ -261,6 +272,7 @@ class ClusterScheduler:
                 "cooldown_sec":    self._cooldown,
                 "prefer_alive":    self._prefer_alive,
                 "circuit_breaker": "enabled" if self._circuit_breaker is not None else "disabled",
+                "rate_limiter":    "enabled" if self._rate_limiter    is not None else "disabled",
                 "heat":            heat_snapshot,
                 "workload_count":  dict(self._workload_count),
                 "affinity_bindings": len(self._affinity_map),
@@ -270,7 +282,6 @@ class ClusterScheduler:
     
     # Internal helpers
     
-
     def _current_heat(self, node_id: str, now: float) -> float:
         """
         Exponential decay: heat halves every ``cooldown_sec`` seconds.

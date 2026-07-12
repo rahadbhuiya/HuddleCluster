@@ -73,6 +73,9 @@ master.start()
 | `GET` | `/v1/breakers` | viewer | All circuit breaker states |
 | `GET` | `/v1/breakers/{node_id}` | viewer | Single node breaker state |
 | `POST` | `/v1/breakers/{node_id}/reset` | admin | Manually reset a breaker |
+| `GET` | `/v1/ratelimits` | viewer | All node token-bucket states |
+| `GET` | `/v1/ratelimits/{node_id}` | viewer | Single node bucket state |
+| `POST` | `/v1/ratelimits/{node_id}/reset` | admin | Refill a bucket to capacity |
 | `GET` | `/dashboard` | none | Web topology dashboard |
 
 ---
@@ -601,6 +604,51 @@ curl -X POST http://localhost:7070/v1/breakers/web-01/reset
 ```
 
 States: `closed` (healthy) → `open` (tripped, excluded from scheduling) → `half_open` (probe window after timeout) → `closed` (auto-reset on recovery).
+
+---
+
+## Rate Limiter
+
+Per-node token bucket that prevents burst traffic from overwhelming individual nodes. When a node's bucket empties, the scheduler skips it and picks the next eligible node, naturally spreading load.
+
+```python
+from huddle_cluster_pkg import MasterNode, ClusterScheduler, ClusterRateLimiter
+
+limiter   = ClusterRateLimiter(
+    capacity=100,      # max burst per node
+    refill_rate=50.0,  # tokens added per second (sustained throughput)
+    on_rate_limited=lambda nid: print(f"{nid} rate-limited"),
+)
+scheduler = ClusterScheduler(rate_limiter=limiter)
+master    = MasterNode(port=7070, scheduler=scheduler, rate_limiter=limiter)
+master.start()
+```
+
+Each `scheduler.pick()` call consumes 1 token from the chosen node's bucket. Buckets refill continuously; a node with `refill_rate=50` can sustain 50 requests/second indefinitely while handling bursts up to `capacity=100`.
+
+```bash
+# All node bucket states
+curl http://localhost:7070/v1/ratelimits
+
+# Single node
+curl http://localhost:7070/v1/ratelimits/web-01
+
+# Operator refill (e.g. after a quiet period or manual investigation)
+curl -X POST http://localhost:7070/v1/ratelimits/web-01/reset
+```
+
+```json
+{
+  "capacity": 100, "refill_rate": 50,
+  "rate_limited_nodes": 1,
+  "buckets": [
+    {"node_id": "web-01", "tokens": 0.0, "rate_limited": true,
+     "utilisation": 1.0, "consumed_total": 4820},
+    {"node_id": "web-02", "tokens": 87.3, "rate_limited": false,
+     "utilisation": 0.127, "consumed_total": 3201}
+  ]
+}
+```
 
 ---
 

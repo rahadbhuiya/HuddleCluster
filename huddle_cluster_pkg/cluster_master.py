@@ -11,7 +11,7 @@ deployment.  It does NOT route traffic itself; instead it:
   - Exposes a REST API consumed by the CLI and external tooling
 
 Author : Rahad Bhuiya
-Version: 4.0.0
+Version: 4.1.0
 License: MIT
 """
 
@@ -179,6 +179,7 @@ class MasterNode:
         ha: Optional[Any] = None,
         multi_region: Optional[Any] = None,
         circuit_breaker: Optional[Any] = None,
+        rate_limiter: Optional[Any] = None,
         on_node_join: Optional[Callable[[NodeRecord], None]] = None,
         on_node_leave: Optional[Callable[[NodeRecord], None]] = None,
         on_node_dead: Optional[Callable[[NodeRecord], None]] = None,
@@ -225,6 +226,7 @@ class MasterNode:
         self._ha                 = ha
         self._multi_region       = multi_region
         self._circuit_breaker    = circuit_breaker
+        self._rate_limiter       = rate_limiter
         if rolling_updater is not None:
             rolling_updater.attach(self)
 
@@ -247,7 +249,6 @@ class MasterNode:
 
     
     # Public API
-    
 
     @property
     def port(self) -> int:
@@ -280,6 +281,8 @@ class MasterNode:
             self._multi_region.attach(self)
         if self._circuit_breaker is not None:
             self._circuit_breaker.attach(self)
+        if self._rate_limiter is not None:
+            self._rate_limiter.attach(self)
         logger.info("MasterNode started on %s:%d (timeout=%.0fs)",
                     self._host, self._port, self._timeout)
 
@@ -298,6 +301,8 @@ class MasterNode:
             self._multi_region.stop()
         if self._circuit_breaker is not None:
             self._circuit_breaker.stop()
+        if self._rate_limiter is not None:
+            self._rate_limiter.stop()
         if self._http:
             self._http.shutdown()
         if self._http_thread:
@@ -369,6 +374,7 @@ class MasterNode:
             "ha":                self._ha.status() if self._ha is not None else "disabled",
             "multi_region":      "enabled" if self._multi_region     is not None else "disabled",
             "circuit_breaker":   "enabled" if self._circuit_breaker  is not None else "disabled",
+            "rate_limiter":      "enabled" if self._rate_limiter      is not None else "disabled",
         }
 
     def prometheus_metrics(self) -> str:
@@ -1409,6 +1415,36 @@ setInterval(refresh, 3000);
                     else:
                         self._send_json(200, state)
 
+                elif path == f"{_API_V1}/ratelimits":
+                    if not self._check_auth("viewer"):
+                        return
+                    if master._rate_limiter is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "rate_limiter is not enabled on this master",
+                        })
+                        return
+                    self._send_json(200, master._rate_limiter.summary())
+
+                elif re.match(rf"{_API_V1}/ratelimits/([^/]+)$", path):
+                    if not self._check_auth("viewer"):
+                        return
+                    if master._rate_limiter is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "rate_limiter is not enabled on this master",
+                        })
+                        return
+                    node_id = path.rsplit("/", 1)[-1]
+                    bucket  = master._rate_limiter.bucket_for(node_id)
+                    if bucket is None:
+                        self._send_json(404, {
+                            "ok": False,
+                            "error": f"no rate-limit bucket for '{node_id}'",
+                        })
+                    else:
+                        self._send_json(200, bucket)
+
                 elif path == f"{_API_V1}/metrics":
                     if not self._check_auth("viewer"):
                         return
@@ -1666,6 +1702,22 @@ setInterval(refresh, 3000);
                     self._send_json(200 if ok else 404, {
                         "ok": ok,
                         "error": None if ok else f"no breaker state for '{node_id}'",
+                    })
+
+                elif re.match(rf"{_API_V1}/ratelimits/([^/]+)/reset$", path):
+                    if not self._check_auth("admin"):
+                        return
+                    if master._rate_limiter is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "rate_limiter is not enabled on this master",
+                        })
+                        return
+                    node_id = path.rsplit("/", 2)[-2]
+                    ok = master._rate_limiter.reset(node_id)
+                    self._send_json(200 if ok else 404, {
+                        "ok": ok,
+                        "error": None if ok else f"no bucket for '{node_id}'",
                     })
 
                 else:
