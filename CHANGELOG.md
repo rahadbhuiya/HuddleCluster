@@ -5,6 +5,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.2.0] - 2026-06-26
+
+### Added — Level 4: Observability & Control Plane (in progress, 3/4)
+
+**Canary Deployment** (`huddle_cluster_pkg.cluster_canary_deployment`)
+- New `ClusterCanaryDeployment` class: weight-based traffic splitting that
+  gradually shifts requests from stable nodes to canary (new-version) nodes
+- Nodes are tagged as canary via join metadata (`canary=true`) or via
+  `POST /v1/canary/announce` at runtime; untagged nodes are stable
+- Configurable weight steps (default 5 → 25 → 50 → 100 %); each call
+  to `advance()` moves to the next level
+- Phases: `idle` → `active` (deployment in progress) → `promoted`
+  (canary graduated) or `aborted` (traffic returned to stable)
+- `set_weight()` for direct weight control outside the step ladder
+- `on_promote`, `on_abort`, `on_weight_change` callbacks
+- `ClusterScheduler` gained a `canary=` parameter; when active, each
+  `pick()` call is routed probabilistically — weight% to canary pool,
+  remainder to stable pool — using the scheduler's existing thermal
+  fitness scoring within each pool.  Fully backward compatible.
+- `ClusterScheduler.scheduler_stats()` reports
+  `"canary": "enabled"/"disabled"`
+- `MasterNode.status()` embeds the full canary status dict under `"canary"`
+- New REST endpoints:
+  `POST /v1/canary/start` — begin deployment (optional `{"weight": N}`);
+  `GET /v1/canary/status` — phase, weight, pool sizes, history;
+  `POST /v1/canary/advance` — step up to next weight level;
+  `POST /v1/canary/promote` — graduate canary to stable;
+  `POST /v1/canary/abort` — return all traffic to stable immediately;
+  `POST /v1/canary/announce` — runtime-tag a node as canary
+- `ClusterCanaryDeployment` exported from `huddle_cluster_pkg` top-level
+
+**Tests** (`tests/test_cluster_canary_deployment.py`, new file)
+- 21 lifecycle unit tests (start/advance/promote/abort/callbacks/history)
+- 7 `pick_pool()` traffic-splitting tests including probabilistic check
+- 4 scheduler integration tests
+- 10 HTTP integration tests including full ramp workflow
+- 42 total new tests
+
+---
+
 ## [4.1.0] - 2026-06-25
 
 ### Added — Level 4: Observability & Control Plane (in progress, 2/4)

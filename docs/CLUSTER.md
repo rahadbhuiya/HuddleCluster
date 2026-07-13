@@ -76,6 +76,12 @@ master.start()
 | `GET` | `/v1/ratelimits` | viewer | All node token-bucket states |
 | `GET` | `/v1/ratelimits/{node_id}` | viewer | Single node bucket state |
 | `POST` | `/v1/ratelimits/{node_id}/reset` | admin | Refill a bucket to capacity |
+| `POST` | `/v1/canary/start` | admin | Begin canary deployment |
+| `GET` | `/v1/canary/status` | viewer | Phase, weight, pool sizes, history |
+| `POST` | `/v1/canary/advance` | admin | Step weight to next level |
+| `POST` | `/v1/canary/promote` | admin | Graduate canary to stable |
+| `POST` | `/v1/canary/abort` | admin | Return all traffic to stable |
+| `POST` | `/v1/canary/announce` | admin | Runtime-tag a node as canary |
 | `GET` | `/dashboard` | none | Web topology dashboard |
 
 ---
@@ -649,6 +655,74 @@ curl -X POST http://localhost:7070/v1/ratelimits/web-01/reset
   ]
 }
 ```
+
+---
+
+## Canary Deployment
+
+Gradually shift traffic from stable nodes to canary (new-version) nodes, with full control at every step.
+
+```python
+from huddle_cluster_pkg import MasterNode, ClusterScheduler, ClusterCanaryDeployment
+
+canary    = ClusterCanaryDeployment(
+    weight_steps=[5, 25, 50, 100],
+    on_promote=lambda: finalize_deploy(),
+    on_abort=lambda: rollback(),
+    on_weight_change=lambda w: print(f"Traffic at {w:.0f}% canary"),
+)
+scheduler = ClusterScheduler(canary=canary)
+master    = MasterNode(port=7070, scheduler=scheduler, canary=canary)
+master.start()
+```
+
+Tag nodes as canary via metadata at join time:
+
+```bash
+huddle-cluster agent start --id web-v2-1 --port 8081 --meta canary=true
+huddle-cluster agent start --id web-v1-1 --port 8080  # stable by default
+```
+
+Or at runtime:
+
+```bash
+curl -X POST http://localhost:7070/v1/canary/announce \
+  -d '{"node_id": "web-v2-2"}'
+```
+
+Control the deployment:
+
+```bash
+# Start at 5% canary traffic
+curl -X POST http://localhost:7070/v1/canary/start -d '{"weight": 5}'
+
+# Step up to 25%
+curl -X POST http://localhost:7070/v1/canary/advance
+
+# Check status
+curl http://localhost:7070/v1/canary/status
+
+# Looks good — graduate
+curl -X POST http://localhost:7070/v1/canary/promote
+
+# Something wrong — back to stable immediately
+curl -X POST http://localhost:7070/v1/canary/abort
+```
+
+```json
+{
+  "phase": "active",
+  "weight_pct": 25.0,
+  "canary_nodes": 2,
+  "stable_nodes": 6,
+  "history": [
+    {"action": "start",   "weight": 5.0},
+    {"action": "advance", "weight": 25.0}
+  ]
+}
+```
+
+Each `scheduler.pick()` routes probabilistically — `weight%` of calls go to the canary pool, the remainder to the stable pool — using the scheduler's existing thermal fitness scoring within each pool.
 
 ---
 

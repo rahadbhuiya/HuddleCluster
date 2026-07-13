@@ -87,7 +87,6 @@ def _node_fitness(node_dict: Dict[str, Any], now: float) -> float:
 
 # ClusterScheduler
 
-
 class ClusterScheduler:
     """
     Thermal-fitness scheduler for the HuddleCluster multi-node system.
@@ -126,20 +125,23 @@ class ClusterScheduler:
         prefer_alive: bool = True,
         circuit_breaker: Optional[Any] = None,
         rate_limiter: Optional[Any] = None,
+        canary: Optional[Any] = None,
     ) -> None:
         """
         Args:
             cooldown_sec:    Heat half-life in seconds.
             prefer_alive:    Alive nodes preferred over quarantined ones.
-            circuit_breaker: Optional ClusterCircuitBreaker; tripped nodes
-                             are excluded from the eligible pool.
-            rate_limiter:    Optional ClusterRateLimiter; rate-limited nodes
-                             are excluded from the eligible pool.
+            circuit_breaker: Optional ClusterCircuitBreaker.
+            rate_limiter:    Optional ClusterRateLimiter.
+            canary:          Optional ClusterCanaryDeployment; when active,
+                             routes each pick to either the canary or stable
+                             pool based on the current traffic weight.
         """
         self._cooldown        = cooldown_sec
         self._prefer_alive    = prefer_alive
         self._circuit_breaker = circuit_breaker
         self._rate_limiter    = rate_limiter
+        self._canary          = canary
 
         self._lock = threading.RLock()
         # heat[node_id] = (heat_value, last_update_time)
@@ -196,6 +198,12 @@ class ClusterScheduler:
                 n for n in eligible
                 if not self._rate_limiter.is_rate_limited(n["node_id"])
             ]
+            if not eligible:
+                return None
+
+        # Canary deployment: narrow to either canary or stable pool
+        if self._canary is not None:
+            eligible = self._canary.pick_pool(eligible)
             if not eligible:
                 return None
 
@@ -273,6 +281,7 @@ class ClusterScheduler:
                 "prefer_alive":    self._prefer_alive,
                 "circuit_breaker": "enabled" if self._circuit_breaker is not None else "disabled",
                 "rate_limiter":    "enabled" if self._rate_limiter    is not None else "disabled",
+                "canary":          "enabled" if self._canary          is not None else "disabled",
                 "heat":            heat_snapshot,
                 "workload_count":  dict(self._workload_count),
                 "affinity_bindings": len(self._affinity_map),
