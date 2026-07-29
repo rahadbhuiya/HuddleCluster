@@ -11,7 +11,7 @@ deployment.  It does NOT route traffic itself; instead it:
   - Exposes a REST API consumed by the CLI and external tooling
 
 Author : Rahad Bhuiya
-Version: 4.2.0
+Version: 4.3.0
 License: MIT
 """
 
@@ -181,6 +181,7 @@ class MasterNode:
         circuit_breaker: Optional[Any] = None,
         rate_limiter: Optional[Any] = None,
         canary: Optional[Any] = None,
+        observability: Optional[Any] = None,
         on_node_join: Optional[Callable[[NodeRecord], None]] = None,
         on_node_leave: Optional[Callable[[NodeRecord], None]] = None,
         on_node_dead: Optional[Callable[[NodeRecord], None]] = None,
@@ -229,6 +230,7 @@ class MasterNode:
         self._circuit_breaker    = circuit_breaker
         self._rate_limiter       = rate_limiter
         self._canary             = canary
+        self._observability      = observability
         if rolling_updater is not None:
             rolling_updater.attach(self)
 
@@ -288,6 +290,8 @@ class MasterNode:
             self._rate_limiter.attach(self)
         if self._canary is not None:
             self._canary.attach(self)
+        if self._observability is not None:
+            self._observability.attach(self)
         logger.info("MasterNode started on %s:%d (timeout=%.0fs)",
                     self._host, self._port, self._timeout)
 
@@ -310,6 +314,8 @@ class MasterNode:
             self._rate_limiter.stop()
         if self._canary is not None:
             self._canary.stop()
+        if self._observability is not None:
+            self._observability.stop()
         if self._http:
             self._http.shutdown()
         if self._http_thread:
@@ -383,6 +389,7 @@ class MasterNode:
             "circuit_breaker":   "enabled" if self._circuit_breaker  is not None else "disabled",
             "rate_limiter":      "enabled" if self._rate_limiter      is not None else "disabled",
             "canary":            self._canary.status() if self._canary is not None else "disabled",
+            "observability":     self._observability.summary() if self._observability is not None else "disabled",
         }
 
     def prometheus_metrics(self) -> str:
@@ -1185,11 +1192,24 @@ setInterval(refresh, 3000);
                 self.wfile.write(body)
                 return False
 
+            def _trace_response(self, code: int) -> None:
+                """Echo the request's trace ID and buffer an http_request event."""
+                if master._observability is None:
+                    return
+                trace_id = getattr(self, "_trace_id", None)
+                if trace_id:
+                    self.send_header("X-Trace-Id", trace_id)
+                master._observability.record_event(
+                    "http_request", trace_id=trace_id,
+                    method=self.command, path=self.path.split("?")[0], status=code,
+                )
+
             def _send_json(self, code: int, body: Any) -> None:
                 data = json.dumps(body, indent=2).encode()
                 self.send_response(code)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
+                self._trace_response(code)
                 self.end_headers()
                 self.wfile.write(data)
 
@@ -1198,6 +1218,7 @@ setInterval(refresh, 3000);
                 self.send_response(code)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(data)))
+                self._trace_response(code)
                 self.end_headers()
                 self.wfile.write(data)
 
@@ -1253,6 +1274,9 @@ setInterval(refresh, 3000);
 
             def do_GET(self) -> None:
                 path = self.path.split("?")[0]
+                if master._observability is not None:
+                    self._trace_id = master._observability.start_trace(
+                        self.headers.get("X-Trace-Id"))
 
                 if path == "/dashboard":
                     self._send_text(200, master.dashboard_html(),
@@ -1464,6 +1488,46 @@ setInterval(refresh, 3000);
                         return
                     self._send_json(200, master._canary.status())
 
+                elif path == f"{_API_V1}/observability/status":
+                    if not self._check_auth("viewer"):
+                        return
+                    if master._observability is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "observability is not enabled on this master",
+                        })
+                        return
+                    self._send_json(200, master._observability.summary())
+
+                elif path == f"{_API_V1}/observability/logs":
+                    if not self._check_auth("viewer"):
+                        return
+                    if master._observability is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "observability is not enabled on this master",
+                        })
+                        return
+                    qs = urllib.parse.parse_qs(
+                        urllib.parse.urlsplit(self.path).query
+                    )
+                    try:
+                        limit = int(qs["limit"][0]) if "limit" in qs else 50
+                    except (ValueError, IndexError):
+                        self._send_json(400, {"ok": False,
+                            "error": "limit must be an integer"})
+                        return
+                    if limit < 0:
+                        self._send_json(400, {"ok": False, "error": "limit must be >= 0"})
+                        return
+                    events = master._observability.events(
+                        limit=limit,
+                        trace_id=qs.get("trace_id", [None])[0],
+                        event=qs.get("event", [None])[0],
+                        node_id=qs.get("node_id", [None])[0],
+                    )
+                    self._send_json(200, {"events": events, "count": len(events)})
+
                 elif path == f"{_API_V1}/metrics":
                     if not self._check_auth("viewer"):
                         return
@@ -1533,6 +1597,9 @@ setInterval(refresh, 3000);
 
             def do_POST(self) -> None:
                 path = self.path.split("?")[0]
+                if master._observability is not None:
+                    self._trace_id = master._observability.start_trace(
+                        self.headers.get("X-Trace-Id"))
 
                 #  Raft RPC endpoints (no auth, no leader check) 
                 if path == f"{_API_V1}/ha/vote":
@@ -1810,6 +1877,9 @@ setInterval(refresh, 3000);
 
             def do_DELETE(self) -> None:
                 path = self.path.split("?")[0]
+                if master._observability is not None:
+                    self._trace_id = master._observability.start_trace(
+                        self.headers.get("X-Trace-Id"))
                 m = re.match(rf"{_API_V1}/nodes/([^/]+)$", path)
                 if m:
                     if not self._check_auth("admin"):

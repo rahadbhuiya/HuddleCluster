@@ -24,6 +24,14 @@ Auto Scaler (v3.1.0)
                        GET /v1/autoscaler/status and automatic on_scale_up /
                        on_scale_down callbacks.
 
+Observability (v4.3.0)
+-----------------------
+    ClusterObservability  Structured JSON logging + distributed trace IDs.
+                          Pass observability=ClusterObservability() to
+                          MasterNode to enable GET /v1/observability/status,
+                          GET /v1/observability/logs, and an X-Trace-Id
+                          header (propagated or minted) on every response.
+
 Third-party backends (optional, require extra dependencies)
 -----------------------------------------------------------
     RedisClusterBackend   Redis shared-state for multi-process deployments.
@@ -56,6 +64,7 @@ from huddle_cluster_pkg.cluster_multi_region      import MultiRegionManager
 from huddle_cluster_pkg.cluster_circuit_breaker   import ClusterCircuitBreaker
 from huddle_cluster_pkg.cluster_rate_limiter        import ClusterRateLimiter
 from huddle_cluster_pkg.cluster_canary_deployment   import ClusterCanaryDeployment
+from huddle_cluster_pkg.cluster_observability       import ClusterObservability
 
 __all__ = [
     "MasterNode", "NodeRecord", "AgentNode",
@@ -63,4 +72,5 @@ __all__ = [
     "ClusterRollingUpdater", "ServiceDiscovery", "ClusterHA",
     "MultiRegionManager", "ClusterCircuitBreaker",
     "ClusterRateLimiter", "ClusterCanaryDeployment",
+    "ClusterObservability",
 ]

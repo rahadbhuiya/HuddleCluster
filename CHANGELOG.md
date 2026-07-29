@@ -5,6 +5,56 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.3.0] - 2026-07-28
+
+### Added — Level 4: Observability & Control Plane — COMPLETE (4/4)
+
+**Observability** (`huddle_cluster_pkg.cluster_observability`)
+- New `ClusterObservability` class: structured JSON logging + distributed
+  trace IDs for a HuddleCluster master
+- `configure_logging()` swaps a logger's handlers for one that emits
+  single-line JSON records (`ts`, `level`, `logger`, `service`, `message`,
+  plus `trace_id` / `node_id` / `fields` when present); idempotent, and
+  wired to the root logger automatically on `attach()` unless
+  `json_logs=False`
+- Every inbound HTTP request to the master is assigned a trace ID —
+  propagated from an `X-Trace-Id` request header when the caller already
+  has one, otherwise minted fresh via `new_trace_id()`. The ID is echoed
+  back on the response (`X-Trace-Id`) and attached to every log line and
+  buffered event recorded while handling that request via a thread-local
+  context (`start_trace()` / `current_trace_id()` / `end_trace()`)
+- `record_event(event, node_id=None, trace_id=None, level="info", **fields)`
+  — in-memory ring buffer (default 500 events) queryable independent of
+  any external log aggregator; also emitted through the logging pipeline
+  so it shows up in JSON log output too
+- `events(limit=, trace_id=, event=, node_id=)` for filtered buffer reads;
+  `summary()` for config + counters + recent events
+- `MasterNode` gained an `observability=` parameter; when set, every
+  `_send_json` / `_send_text` response gets an `X-Trace-Id` header and a
+  buffered `http_request` event (method, path, status). Fully backward
+  compatible — omitting `observability` behaves exactly as before
+- `MasterNode.status()` embeds the full observability summary under
+  `"observability"`
+- New REST endpoints:
+  `GET /v1/observability/status` — config, counters, recent events;
+  `GET /v1/observability/logs` — queryable event buffer
+  (`?limit=&trace_id=&event=&node_id=`)
+- `ClusterObservability` exported from `huddle_cluster_pkg` top-level
+- This completes Level 4 (Observability & Control Plane): Circuit
+  Breaker, Rate Limiter, Canary Deployment, Observability
+
+**Tests** (`tests/test_cluster_observability.py`, new file)
+- 5 trace-context unit tests (mint, propagate, blank incoming, clear)
+- 11 event-buffer unit tests (record, filter, limit, cap, validation)
+- 4 JSON log formatter unit tests
+- 2 `configure_logging()` idempotency/wiring tests
+- 14 HTTP integration tests (status/logs endpoints, X-Trace-Id
+  propagation and header echo, request-to-event correlation, GET and
+  POST tracing)
+- 36 total new tests
+
+---
+
 ## [4.2.0] - 2026-06-26
 
 ### Added — Level 4: Observability & Control Plane (in progress, 3/4)

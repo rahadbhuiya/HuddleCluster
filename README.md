@@ -157,7 +157,7 @@ Under server failure, P95 latency stays under **86 ms** where NGINX round-robin 
 - Cluster Circuit Breaker — error-rate-based automatic trip/reset, scheduler exclusion — v4.0
 - Rate Limiter — per-node token bucket, burst protection, scheduler exclusion — v4.1
 - Canary Deployment — weight-based traffic splitting, start/advance/promote/abort — v4.2
-- Planned (Level 4): observability
+- Observability — structured JSON logging, distributed trace IDs — v4.3, Level 4 complete
 
 ---
 

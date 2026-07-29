@@ -35,15 +35,24 @@ def _get(port, path):
 
 def _post(port, path, payload=None):
     data = json.dumps(payload or {}).encode()
-    req  = urllib.request.Request(
-        f"http://127.0.0.1:{port}/v1{path}", data=data, method="POST")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Content-Length", str(len(data)))
-    try:
-        with urllib.request.urlopen(req, timeout=3) as r:
-            return json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        return json.loads(e.read())
+    last_err = None
+    for attempt in range(3):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1{path}", data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Content-Length", str(len(data)))
+        try:
+            with urllib.request.urlopen(req, timeout=3) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return json.loads(e.read())
+        except (ConnectionAbortedError, ConnectionResetError, OSError) as e:
+            # Transient local connection reset (seen on Windows, usually AV/
+            # firewall interference on rapid back-to-back localhost
+            # requests) — retry with a short backoff before giving up.
+            last_err = e
+            time.sleep(0.05 * (attempt + 1))
+    raise last_err
 
 
 def _join(port, node_id, canary=False, p=9860):
