@@ -29,6 +29,15 @@ except ImportError:
 parser = argparse.ArgumentParser()
 parser.add_argument("--port",    type=int,   default=8001)
 parser.add_argument("--latency", type=float, default=15.0,  help="Base latency in ms")
+parser.add_argument("--jitter",  type=float, default=2.0,
+                     help="Jitter stddev in ms (default 2.0, matches original "
+                          "fixed behavior). For WAN-like simulation, pass "
+                          "something proportional to --latency, e.g. 20%% of it.")
+parser.add_argument("--loss-pct", type=float, default=0.0,
+                     help="Probability (0-100) that a request hangs for 5s "
+                          "and returns an error, simulating a WAN packet-loss "
+                          "-> TCP-retransmit-timeout style failure. Default 0 "
+                          "(no simulated loss) — matches original behavior.")
 parser.add_argument("--id",      type=str,   default="s0")
 args, _ = parser.parse_known_args()
 
@@ -54,9 +63,16 @@ async def work():
         await asyncio.sleep(5.0)
         return {"error": "server dead"}
 
+    if args.loss_pct > 0 and random.random() * 100 < args.loss_pct:
+        # Simulate a WAN packet-loss / retransmit-timeout style failure
+        # rather than a clean fast error — this is what actually hurts
+        # tail latency on lossy links.
+        await asyncio.sleep(5.0)
+        return {"error": "simulated packet loss (retransmit timeout)"}
+
     state["requests"] += 1
     base = state["base_latency"] * 5.0 if state["is_slow"] else state["base_latency"]
-    jitter = random.gauss(0, 2)
+    jitter = random.gauss(0, args.jitter)
     latency_ms = max(1.0, base + jitter)
     await asyncio.sleep(latency_ms / 1000.0)
     return {

@@ -86,7 +86,122 @@ master.start()
 
 ---
 
+## Persistence
+
+Neither the node registry nor Raft term/voted_for survive a process
+restart by default — a crashed master comes back with an empty registry
+(nodes self-heal by re-joining on their next heartbeat) and, if HA is
+enabled, an HA node could in principle revote in a term it already voted
+in. Both are opt-in to persist, as of v4.5.0:
+
+```python
+master = MasterNode(
+    port=7070,
+    state_file="/var/lib/huddle/master_registry.json",
+    state_save_interval_sec=5.0,     # default; snapshot cadence while running
+)
+
+ha = ClusterHA(
+    node_id="master-1",
+    peers=["http://master-2:7071"],
+    state_file="/var/lib/huddle/ha_state.json",   # term/voted_for only
+)
+```
+
+Notes:
+- Both writes are atomic (`tmp` file + `fsync` + `os.replace`) — a crash
+  mid-write never leaves a half-written file.
+- `MasterNode.state_file` snapshots the full node registry (status,
+  metadata, heartbeat counters) every `state_save_interval_sec` while
+  running, plus once more on a graceful `stop()`. On restart, restored
+  nodes keep their last-known status — the normal heartbeat-timeout
+  logic then re-evaluates liveness within one timeout window.
+- `ClusterHA.state_file` only persists `term`/`voted_for` (a few bytes),
+  written synchronously on every vote grant and term change — this one
+  is a correctness property, not just convenience, so there's no
+  interval/batching.
+- Circuit breaker trip state, rate limiter buckets, and canary rollout
+  progress are **not** persisted (still in-memory only) — these are
+  short-lived/self-correcting by design (a breaker retrips within
+  seconds if the underlying error rate is still high), so the
+  restart-loses-it tradeoff is deliberate for now.
+
+---
+
+## TLS / HTTPS
+
+By default the master serves plain HTTP — fine for a private network, but
+`api_keys` travel in plaintext unless you put TLS in front of it. As of
+v4.4.0 the master can terminate TLS itself, so a reverse proxy is no
+longer required just to get encryption:
+
+```python
+# HTTPS — server certificate only
+master = MasterNode(
+    port=7070,
+    tls_certfile="/etc/huddle/server.crt",
+    tls_keyfile="/etc/huddle/server.key",
+)
+
+# mTLS — also verify the client's certificate (strong node identity,
+# stronger than an API key alone since it can't be replayed off a
+# compromised log line)
+master = MasterNode(
+    port=7070,
+    tls_certfile="/etc/huddle/server.crt",
+    tls_keyfile="/etc/huddle/server.key",
+    tls_ca_certs="/etc/huddle/ca.crt",             # CA that signs client certs
+    tls_require_client_cert=True,                   # reject if no valid client cert
+)
+```
+
+Or via the CLI:
+
+```bash
+huddle-cluster master start --port 7070 \
+    --tls-cert /etc/huddle/server.crt --tls-key /etc/huddle/server.key \
+    --tls-ca /etc/huddle/ca.crt --tls-require-client-cert
+```
+
+Notes:
+- `tls_certfile`/`tls_keyfile` must be given together — one without the
+  other raises `ValueError` at construction time.
+- `tls_require_client_cert=True` requires `tls_ca_certs` for the same
+  reason — there'd be nothing to verify the client cert against otherwise.
+- `tls_ca_certs` without `tls_require_client_cert` verifies a client cert
+  *if the client presents one*, but doesn't require one (`CERT_OPTIONAL`).
+- Once TLS is enabled, plain HTTP requests to that port are rejected at
+  the TLS handshake — there's no dual HTTP+HTTPS listener on one port.
+- Certificate generation/rotation/renewal is out of scope here — bring
+  your own certs (e.g. from your internal CA, `cert-manager`, or Let's
+  Encrypt for a public master).
+
+### Node identity via mTLS
+
+When a node joins over a connection with a verified client certificate
+(`tls_ca_certs` configured), the certificate's Common Name is recorded
+on that node's record as `tls_client_cn`:
+
+```bash
+curl https://master:7070/v1/nodes/agent-1 -H "Authorization: Bearer ..."
+```
+```json
+{ "node_id": "agent-1", "tls_client_cn": "agent-1.internal.example.com", ... }
+```
+
+This is a stronger identity signal than an API key alone: an API key is
+a bearer secret (whoever holds it can join as anyone), whereas a client
+certificate is bound to a private key that never leaves the agent and
+can't be replayed from a log line or a leaked config file. It's *not*
+currently used to gate authorization (that's still `api_keys` /
+`_check_auth`) — think of it as an audit trail and a building block, not
+a replacement for RBAC. `tls_client_cn` is `None` for plain-HTTP
+connections or when no client cert was presented.
+
+---
+
 ## Authentication
+
 
 ```python
 # No auth (open, default — backward compatible)
@@ -485,9 +600,36 @@ curl http://master-1:7070/v1/ha/status
 
 **Leader writes, followers redirect.** Agents and clients that send writes (join, heartbeat, leave) to a follower get `HTTP 307` with `X-Leader-URL` and `{"leader_url": "..."}` in the body, so they can retry against the leader.
 
-**State replication.** The leader pushes a full registry snapshot to all followers every `sync_interval_sec`. Followers serve read requests (`GET /v1/nodes`, `GET /v1/status`, etc.) from their local cache.
+**State replication.** The leader pushes a full registry snapshot to all followers every `sync_interval_sec`, *and* once immediately upon winning an election (as of v4.7.0) rather than waiting for the first periodic tick — this closes most of the staleness window right after a failover, when a second failure would otherwise be most costly. Followers serve read requests (`GET /v1/nodes`, `GET /v1/status`, etc.) from their local cache.
 
 **Failover.** When the leader stops, followers detect the missing heartbeat after `election_timeout_sec` and hold a new election. A 3-node cluster tolerates 1 failure; a 5-node cluster tolerates 2. A 2-node cluster cannot tolerate any failure — this is correct Raft behaviour, not a limitation of HuddleCluster.
+
+### Honest limitations
+
+This is a **simplified** Raft, and it's worth being precise about what
+that means rather than calling it "hardened" and moving on:
+
+- **Full-snapshot replication, not a log.** Real Raft replicates a log
+  of individual entries with a commit index and matches log positions
+  between leader and followers before committing. This implementation
+  replicates the *entire current registry* on each sync tick (or
+  immediately on election, since v4.7.0). Simpler, but it means there's
+  no notion of "this specific write is durably committed to a majority"
+  — a write on the leader is visible to followers only at the next
+  snapshot push, not synchronously as part of the write itself.
+- **No cluster membership changes.** `peers` is fixed at construction.
+  Adding/removing a master requires restarting every node with an
+  updated peer list — there's no joint-consensus membership-change
+  protocol.
+- **Term/vote are persisted (v4.5.0+), the registry snapshot is not
+  (per-node, via `state_file` on `MasterNode` itself).** These are two
+  separate persistence mechanisms — see [Persistence](#persistence)
+  above.
+- **Not independently audited or chaos-tested** against network
+  partitions, clock skew, or Byzantine peers. Treat it as "meaningfully
+  better than nothing" for tolerating a clean node failure, not as a
+  drop-in replacement for etcd/Consul in an adversarial or
+  regulatory-compliance context.
 
 ```python
 # Useful defaults
@@ -726,11 +868,132 @@ Each `scheduler.pick()` routes probabilistically — `weight%` of calls go to th
 
 ---
 
+## Observability
+
+```python
+from huddle_cluster_pkg import MasterNode, ClusterObservability
+
+obs = ClusterObservability(
+    service_name="huddle-cluster-prod",
+    otlp_endpoint="http://otel-collector:4318",   # optional — see below
+)
+master = MasterNode(port=7070, observability=obs)
+master.start()
+```
+
+**Structured JSON logging.** Once attached, the process logger emits
+single-line JSON instead of plain text (`ts`, `level`, `service`,
+`message`, plus `trace_id`/`node_id`/`fields` when present). Set
+`json_logs=False` to skip touching the logging config.
+
+**Distributed trace IDs.** Every request gets a trace ID — propagated
+from an `X-Trace-Id` request header if present, minted otherwise —
+echoed back on the response and attached to every log line and
+buffered event from that request.
+
+**Local query API** (always available, no external system needed):
+
+```bash
+curl https://master:7070/v1/observability/status
+curl https://master:7070/v1/observability/logs?limit=20&trace_id=abc123
+```
+
+**OTLP export (optional).** As of v4.8.0, set `otlp_endpoint` to also
+push buffered events to any OTLP/HTTP-compatible collector (Jaeger,
+Tempo, an OpenTelemetry Collector, Grafana Cloud, etc.) — JSON encoding,
+no `opentelemetry-*`/protobuf/grpc dependency required:
+
+```python
+obs = ClusterObservability(
+    otlp_endpoint="http://otel-collector:4318",
+    otlp_headers={"Authorization": "Bearer <token>"},   # optional
+    otlp_flush_interval_sec=5.0,                          # default
+)
+```
+
+Notes:
+- Export runs on a background thread, POSTing to
+  `{otlp_endpoint}/v1/logs` as OTLP logs JSON on each flush interval,
+  plus once more on `stop()` to flush anything pending.
+- Best-effort: a failed export is logged and retried next interval —
+  it never raises into request-handling code, and never drops events
+  (they stay in the local buffer, subject to the normal `buffer_size`
+  eviction, until a send succeeds).
+- `summary()` / `GET /v1/observability/status` report `otlp.exported_count`,
+  `otlp.error_count`, and `otlp.last_error` for monitoring the exporter
+  itself.
+- Local trace IDs are 8 bytes (16 hex chars); OTLP's `traceId` field
+  expects 16 bytes (32 hex chars), so they're left-padded with zeros on
+  export — collectors that validate length accept them, but don't
+  expect them to collide-resist the same way a full 16-byte ID would in
+  a very high-volume, multi-service trace (HuddleCluster's trace IDs
+  are scoped to a single master's request lifecycle, not a full
+  distributed span tree).
+
+---
+
 ## Behaviour Highlights
 
 - **Dead detection** — a node is marked `dead` if no heartbeat arrives within `heartbeat_timeout_sec`. It auto-recovers to `alive` when heartbeats resume (or to `quarantined` if it has been flapping).
 - **Auto-rejoin** — if the master restarts and loses its registry, each agent re-registers itself within 3 × `heartbeat_interval` automatically.
 - **Fast shutdown** — `master.stop()` and `agent.stop()` both complete in under 100 ms.
+
+---
+
+## Deployment
+
+As of v4.9.0, `deploy/` has a Dockerfile, a docker-compose demo, and
+basic Kubernetes manifests — a starting point, not a hardened deployment
+you should point at production without reading it first.
+
+**Docker:**
+
+```bash
+docker build -f deploy/docker/Dockerfile -t huddlecluster:latest .
+docker run -p 7070:7070 huddlecluster:latest master start --port 7070
+docker run huddlecluster:latest agent start --id web-1 --master http://host.docker.internal:7070 --port 8080
+```
+
+**docker-compose (1 master + 3 agents, local demo):**
+
+```bash
+cd deploy/docker && docker compose up --build
+curl http://localhost:7070/v1/nodes
+```
+
+**Kubernetes:**
+
+```bash
+kubectl apply -f deploy/k8s/
+```
+
+`deploy/k8s/master.yaml` — a single-replica Deployment (Recreate
+strategy, so two masters never write the same PVC concurrently),
+PersistentVolumeClaim for `--state-file`, and a Secret for the API key.
+`deploy/k8s/agent-daemonset.yaml` — one agent per node via DaemonSet,
+using `spec.nodeName` as the agent ID.
+
+**Graceful shutdown matters here:** `docker stop` and Kubernetes pod
+termination send `SIGTERM`, not `SIGINT` (Ctrl-C) — the CLI now
+(v4.9.0) translates `SIGTERM` into the same graceful-stop path, so
+`--state-file` gets a final flush before the process exits.
+`terminationGracePeriodSeconds` in the Deployment/DaemonSet gives that
+shutdown time to complete rather than being hard-killed.
+
+**What this deployment setup does *not* give you** — same honesty as
+elsewhere in this doc:
+- No Helm chart (plain manifests only) — no templating for
+  multi-environment values, no chart versioning
+- No image published to a registry — `image: huddlecluster:latest`
+  assumes you build and push it yourself
+- No HA wiring in the manifests — `master.yaml` deploys one replica;
+  see [High-Availability Master](#high-availability-master) to run 3
+  and wire `ClusterHA(peers=...)` across them yourself
+- No network policies, pod security context, or ingress/TLS-at-the-edge
+  configuration — bring your own per your cluster's standards
+- Not load-tested at Kubernetes scale (hundreds of agent Pods against
+  one master) — the [WAN / high-latency benchmark](#running-benchmarks)
+  below is Docker-bridge/local only, not a K8s-scale validation
 
 ---
 
@@ -761,7 +1024,49 @@ python benchmarks/benchmark_sim.py
 
 # NGINX baseline comparison
 python benchmarks/benchmark_nginx.py
+
+# WAN-latency simulation (region-realistic latency/jitter/loss, no Docker needed)
+python benchmarks/benchmark_wan.py
 ```
+
+### WAN / high-latency benchmark
+
+`benchmark_http.py` validates against real HTTP servers, but on loopback
+— tight, low-jitter latencies (12-22ms), not WAN. `benchmark_wan.py`
+runs the same kind of comparison against upstream servers configured
+with region-realistic one-way latency (8ms same-region up to 110ms
+cross-continent), jitter proportional to latency, and a small rate of
+simulated packet loss, to check whether adaptive routing still helps
+once individual servers are meaningfully slower and less predictable.
+
+**Be precise about what this does and doesn't validate** — full
+reasoning is in the script's docstring, but briefly:
+- It's **application-level** latency simulation (each upstream server
+  sleeps a randomised duration before responding), not kernel-level
+  `tc netem`. netem would be more realistic but needs root +
+  CAP_NET_ADMIN + the `sch_netem` kernel module — not guaranteed in a
+  sandboxed/CI container (confirmed unavailable in the container this
+  was developed in). `--use-netem` attempts it and falls back with a
+  warning if unavailable.
+- It still runs everything as local processes on one host over
+  loopback. It validates the **algorithm** under WAN-like
+  latency/jitter/loss characteristics, not real cross-region network
+  behavior (actual routing, real congestion, DNS, TLS handshake cost
+  over an actual WAN link). A genuine multi-region validation needs
+  servers actually deployed in different cloud regions.
+
+Sample result from one run (`--n 300`, 1% simulated loss per request,
+6 simulated regions from 8ms to 110ms base latency):
+
+| Balancer | P50 | P95 | P99 | Avg |
+|---|---|---|---|---|
+| Round Robin | 348.6ms | 637.0ms | 682.6ms | 369.6ms |
+| HuddleCluster | 327.0ms | 465.0ms | 524.8ms | 326.9ms |
+
+P95 was ~27% lower for HuddleCluster in that run. Numbers vary between
+runs due to randomised jitter/loss — that's real variance, not a typo;
+re-run it yourself rather than treating the table above as a
+guaranteed result.
 
 ---
 
@@ -789,10 +1094,16 @@ git push origin v3.0.0
 **Level 2 — Production Ready (complete)**
 Auto recovery · Prometheus metrics · RBAC/auth · Web dashboard · REST API expansion
 
-**Level 3 — Kubernetes/Swarm-grade (in progress)**
+**Level 3 — Kubernetes/Swarm-grade (complete)**
 - [x] Scheduler — thermal-fitness workload placement — v3.0.0
 - [x] Auto scaling — ClusterAutoScaler with heat + node-count signals — v3.1.0
 - [x] Rolling updates — ClusterRollingUpdater with health gate — v3.2.0
 - [x] Service discovery — health-aware registry, metadata-driven, DNS responder — v3.3.0
 - [x] High-availability master — simplified Raft leader election + state replication — v3.4.0
 - [x] Multi-region support — cross-datacenter topology, region-aware scheduling — v3.5.0
+
+**Level 4 — Observability & Control Plane (complete)**
+- [x] Circuit breaker — error-rate-based automatic trip/reset, scheduler exclusion — v4.0.0
+- [x] Rate limiter — per-node token bucket, burst protection, scheduler exclusion — v4.1.0
+- [x] Canary deployment — weight-based traffic splitting, start/advance/promote/abort — v4.2.0
+- [x] Observability — structured JSON logging, distributed trace IDs — v4.3.0

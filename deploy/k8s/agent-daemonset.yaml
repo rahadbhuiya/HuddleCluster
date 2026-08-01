@@ -1,0 +1,56 @@
+# HuddleCluster agents — one per node, reporting to the in-cluster master.
+#
+#   kubectl apply -f deploy/k8s/
+#
+# Runs as a DaemonSet: one agent Pod per Kubernetes node, each
+# registering itself with the master Service. Adjust to a Deployment
+# instead if you want a fixed number of agents unrelated to node count
+# (e.g. agents fronting a specific backend service rather than
+# representing cluster nodes themselves).
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: huddlecluster-agent
+  labels:
+    app: huddlecluster-agent
+spec:
+  selector:
+    matchLabels:
+      app: huddlecluster-agent
+  template:
+    metadata:
+      labels:
+        app: huddlecluster-agent
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: agent
+          image: huddlecluster:latest   # replace with your built/pushed image
+          args:
+            - agent
+            - start
+            - --id=$(NODE_NAME)
+            - --master=http://huddlecluster-master:7070
+            - --port=8080
+            - --api-key=$(ADMIN_API_KEY)
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: huddlecluster-master-secrets
+                  key: admin-api-key
+          ports:
+            - containerPort: 8080
+              name: http
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"

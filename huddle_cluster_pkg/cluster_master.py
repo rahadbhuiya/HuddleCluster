@@ -18,7 +18,10 @@ License: MIT
 from __future__ import annotations
 
 import http.server
+import ssl
 import json
+import os
+import tempfile
 import logging
 import re
 import threading
@@ -79,6 +82,7 @@ class NodeRecord:
     death_count: int = 0
     recent_deaths: List[float] = field(default_factory=list)
     consecutive_alive_heartbeats: int = 0
+    tls_client_cn: Optional[str] = None
 
     @property
     def url(self) -> str:
@@ -172,6 +176,12 @@ class MasterNode:
         purge_after_sec: Optional[float] = None,
         unhealthy_alive_ratio: Optional[float] = None,
         api_keys: Optional[Dict[str, str]] = None,
+        tls_certfile: Optional[str] = None,
+        tls_keyfile: Optional[str] = None,
+        tls_ca_certs: Optional[str] = None,
+        tls_require_client_cert: bool = False,
+        state_file: Optional[str] = None,
+        state_save_interval_sec: float = 5.0,
         scheduler: Optional[Any] = None,
         autoscaler: Optional[Any] = None,
         rolling_updater: Optional[Any] = None,
@@ -220,6 +230,22 @@ class MasterNode:
                         "treated as having no access",
                         key[-4:] if len(key) >= 4 else key, role,
                     )
+
+        if bool(tls_certfile) != bool(tls_keyfile):
+            raise ValueError(
+                "tls_certfile and tls_keyfile must both be provided together")
+        if tls_require_client_cert and not tls_ca_certs:
+            raise ValueError(
+                "tls_require_client_cert=True requires tls_ca_certs "
+                "(the CA used to verify node/client certificates)")
+        self._tls_certfile = tls_certfile
+        self._tls_keyfile  = tls_keyfile
+        self._tls_ca_certs = tls_ca_certs
+        self._tls_require_client_cert = tls_require_client_cert
+        self._state_file = state_file
+        self._state_save_interval = state_save_interval_sec
+        self._state_write_lock = threading.Lock()
+        self._last_state_save = 0.0
 
         self._scheduler          = scheduler
         self._autoscaler         = autoscaler
@@ -273,6 +299,8 @@ class MasterNode:
             raise RuntimeError("MasterNode is already running")
         self._running = True
         self._started_at = time.time()
+        if self._state_file:
+            self._load_registry_snapshot()
         self._start_http()
         self._start_monitor()
         if self._autoscaler is not None:
@@ -316,6 +344,8 @@ class MasterNode:
             self._canary.stop()
         if self._observability is not None:
             self._observability.stop()
+        if self._state_file:
+            self._save_registry_snapshot()
         if self._http:
             self._http.shutdown()
         if self._http_thread:
@@ -355,6 +385,87 @@ class MasterNode:
     def node_count(self) -> int:
         with self._lock:
             return len(self._nodes)
+
+    
+    # Persistence — node registry survives a master process restart
+    
+
+    def _save_registry_snapshot(self) -> None:
+        """Atomically snapshot the node registry to state_file. No-op if
+        state_file wasn't configured. Best-effort: logs and returns on
+        failure rather than raising, since this runs from a background
+        thread where an exception would otherwise be silently swallowed
+        or crash the monitor loop."""
+        if not self._state_file:
+            return
+        with self._lock:
+            payload = {
+                "version": 1,
+                "saved_at": time.time(),
+                "nodes": {nid: asdict(rec) for nid, rec in self._nodes.items()},
+            }
+        tmp_path = None
+        with self._state_write_lock:
+            try:
+                target_dir = os.path.dirname(os.path.abspath(self._state_file))
+                os.makedirs(target_dir, exist_ok=True)
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".tmp", dir=target_dir,
+                    delete=False, encoding="utf-8",
+                ) as fh:
+                    tmp_path = fh.name
+                    json.dump(payload, fh)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp_path, self._state_file)
+                tmp_path = None
+                self._last_state_save = time.time()
+            except OSError as e:
+                logger.error(
+                    "MasterNode: failed to save registry snapshot to %s: %s",
+                    self._state_file, e,
+                )
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+
+    def _load_registry_snapshot(self) -> None:
+        """Restore the node registry from state_file on startup. Restored
+        nodes keep their last-known status and last_heartbeat timestamp —
+        the normal heartbeat-timeout logic in _check_heartbeats() then
+        naturally re-evaluates liveness (a node whose agent is still
+        heartbeating will refresh within one timeout window; one that
+        isn't will correctly transition to 'dead')."""
+        try:
+            with open(self._state_file, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except FileNotFoundError:
+            return   # first run — nothing to restore
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(
+                "MasterNode: could not read state_file %s (%s) — "
+                "starting with an empty registry", self._state_file, e,
+            )
+            return
+
+        restored = 0
+        with self._lock:
+            for node_id, data in payload.get("nodes", {}).items():
+                try:
+                    self._nodes[node_id] = NodeRecord(**data)
+                    restored += 1
+                except TypeError as e:
+                    logger.warning(
+                        "MasterNode: skipping unrecoverable node record "
+                        "%r in %s (%s)", node_id, self._state_file, e,
+                    )
+        logger.info(
+            "MasterNode: restored %d node(s) from %s",
+            restored, self._state_file,
+        )
 
     def status(self) -> Dict[str, Any]:
         """High-level cluster status suitable for the CLI and dashboards."""
@@ -1270,6 +1381,29 @@ setInterval(refresh, 3000);
 
                 return True
 
+            def _tls_client_cn(self) -> Optional[str]:
+                """
+                Common Name from the client's TLS certificate, if this
+                connection is over TLS with a client cert presented and
+                verified (tls_ca_certs configured on the master). Returns
+                None over plain HTTP, or if no client cert was presented,
+                or if the cert has no CN in its subject.
+                """
+                sslobj = getattr(self.connection, "_sslobj", None)
+                if sslobj is None:
+                    return None
+                try:
+                    cert = self.connection.getpeercert()
+                except Exception:
+                    return None
+                if not cert:
+                    return None
+                for rdn in cert.get("subject", ()):
+                    for key, value in rdn:
+                        if key == "commonName":
+                            return value
+                return None
+
             #  GET 
 
             def do_GET(self) -> None:
@@ -1646,7 +1780,7 @@ setInterval(refresh, 3000);
                     if body is None:
                         self._send_json(400, {"ok": False, "error": "invalid JSON"})
                         return
-                    result = master._handle_join(body)
+                    result = master._handle_join(body, tls_client_cn=self._tls_client_cn())
                     self._send_json(200 if result.get("ok") else 400, result)
 
                 elif re.match(rf"{_API_V1}/nodes/([^/]+)/heartbeat$", path):
@@ -1913,8 +2047,24 @@ setInterval(refresh, 3000);
                 else:
                     self._send_json(404, {"ok": False, "error": "not found"})
 
-        self._http = http.server.HTTPServer((self._host, self._port), _Handler)
+        self._http = http.server.ThreadingHTTPServer((self._host, self._port), _Handler)
+        self._http.daemon_threads = True
         self._http.allow_reuse_address = True
+        if self._tls_certfile:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(certfile=self._tls_certfile, keyfile=self._tls_keyfile)
+            if self._tls_ca_certs:
+                ctx.load_verify_locations(cafile=self._tls_ca_certs)
+                ctx.verify_mode = (
+                    ssl.CERT_REQUIRED if self._tls_require_client_cert
+                    else ssl.CERT_OPTIONAL
+                )
+            self._http.socket = ctx.wrap_socket(self._http.socket, server_side=True)
+            logger.info(
+                "MasterNode TLS enabled (client cert %s)",
+                "required" if self._tls_require_client_cert else
+                "optional" if self._tls_ca_certs else "not verified",
+            )
         self._http_thread = threading.Thread(
             target=lambda: self._http.serve_forever(poll_interval=0.05),
             name="master-http",
@@ -1941,6 +2091,10 @@ setInterval(refresh, 3000);
             if self._running:
                 self._check_heartbeats()
                 self._check_cluster_health()
+                if (self._state_file
+                        and time.time() - self._last_state_save
+                        >= self._state_save_interval):
+                    self._save_registry_snapshot()
 
     def _check_heartbeats(self) -> None:
         now = time.time()
@@ -2062,7 +2216,7 @@ setInterval(refresh, 3000);
     # Internal — request handlers
     
 
-    def _handle_join(self, data: Dict) -> Dict:
+    def _handle_join(self, data: Dict, tls_client_cn: Optional[str] = None) -> Dict:
         node_id = (data.get("node_id") or "").strip()
         address  = (data.get("address")  or "").strip()
         port     = data.get("port")
@@ -2085,6 +2239,8 @@ setInterval(refresh, 3000);
                 existing.address        = address
                 existing.port           = port
                 existing.metadata       = data.get("metadata") or {}
+                if tls_client_cn:
+                    existing.tls_client_cn = tls_client_cn
                 now = time.time()
                 existing.last_heartbeat = now
 
@@ -2112,6 +2268,7 @@ setInterval(refresh, 3000);
                     address  = address,
                     port     = port,
                     metadata = data.get("metadata") or {},
+                    tls_client_cn = tls_client_cn,
                 )
                 self._nodes[node_id] = new_record
                 action = "joined"

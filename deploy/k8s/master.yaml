@@ -1,0 +1,112 @@
+# HuddleCluster master — Kubernetes Deployment + Service + PVC.
+#
+#   kubectl apply -f deploy/k8s/
+#
+# Notes:
+# - Single replica by design — HA across replicas needs ClusterHA
+#   (peers=) wired up explicitly; this manifest deploys one master.
+#   For HA, run 3 separate Deployments/StatefulSet replicas each with
+#   distinct --state-file paths and peers pointing at each other's
+#   Service DNS names (see docs/CLUSTER.md "High-Availability Master").
+# - API key and TLS cert are pulled from a Secret — never bake secrets
+#   into the image or a ConfigMap.
+# - readinessProbe hits /v1/health (no auth required, per docs/CLUSTER.md).
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: huddlecluster-master-state
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: huddlecluster-master-secrets
+type: Opaque
+stringData:
+  # Replace before deploying — this is a placeholder.
+  admin-api-key: "CHANGE-ME-before-deploying"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: huddlecluster-master
+  labels:
+    app: huddlecluster-master
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # avoid two masters writing the same PVC concurrently
+  selector:
+    matchLabels:
+      app: huddlecluster-master
+  template:
+    metadata:
+      labels:
+        app: huddlecluster-master
+    spec:
+      terminationGracePeriodSeconds: 15   # give SIGTERM handling time to flush state
+      containers:
+        - name: master
+          image: huddlecluster:latest   # replace with your built/pushed image
+          args:
+            - master
+            - start
+            - --port=7070
+            - --state-file=/var/lib/huddle/registry.json
+            - --api-key=$(ADMIN_API_KEY)=admin
+          env:
+            - name: ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: huddlecluster-master-secrets
+                  key: admin-api-key
+          ports:
+            - containerPort: 7070
+              name: http
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/huddle
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: 7070
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /v1/health
+              port: 7070
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: huddlecluster-master-state
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: huddlecluster-master
+spec:
+  selector:
+    app: huddlecluster-master
+  ports:
+    - port: 7070
+      targetPort: 7070
+      name: http
+  type: ClusterIP

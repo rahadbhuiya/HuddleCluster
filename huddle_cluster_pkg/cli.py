@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
 import time
 import urllib.error
@@ -105,6 +106,24 @@ def _print_json(data: Dict) -> None:
 # Command handlers
 
 
+def _handle_termination_signals() -> None:
+    """
+    Docker (`docker stop`) and Kubernetes send SIGTERM on shutdown, not
+    SIGINT — only Ctrl-C sends SIGINT. Without this, a containerized
+    master/agent would be killed without ever running its graceful
+    stop() (which flushes state_file snapshots and, for a master with
+    HA, isn't relevant but for the registry-persistence case above it
+    matters). Translate SIGTERM into the same KeyboardInterrupt path
+    Ctrl-C already uses.
+    """
+    def _on_sigterm(signum, frame):
+        raise KeyboardInterrupt()
+    try:
+        signal.signal(signal.SIGTERM, _on_sigterm)
+    except (ValueError, OSError):
+        pass   # not in the main thread, or platform doesn't support it
+
+
 def cmd_master_start(args: argparse.Namespace) -> None:
     """Start a MasterNode (blocking until Ctrl-C)."""
     import logging
@@ -136,6 +155,12 @@ def cmd_master_start(args: argparse.Namespace) -> None:
         quarantine_recovery_heartbeats=args.quarantine_recovery,
         purge_after_sec=args.purge_after,
         api_keys=api_keys,
+        tls_certfile=args.tls_cert,
+        tls_keyfile=args.tls_key,
+        tls_ca_certs=args.tls_ca,
+        tls_require_client_cert=args.tls_require_client_cert,
+        state_file=args.state_file,
+        state_save_interval_sec=args.state_save_interval,
     )
 
     def on_join(node):
@@ -169,12 +194,19 @@ def cmd_master_start(args: argparse.Namespace) -> None:
     if args.purge_after:
         print(f"  Purge     : dead nodes removed after {args.purge_after:.0f}s")
     print(f"  Auth      : {'enabled (' + str(len(api_keys)) + ' key(s))' if api_keys else 'disabled (open API)'}")
-    print(f"  API prefix: http://{args.host}:{args.port}{_API_V1}/")
+    print(f"  Persist   : {'enabled (' + args.state_file + ')' if args.state_file else 'disabled (in-memory registry only)'}")
+    _scheme = "https" if args.tls_cert else "http"
+    if args.tls_cert:
+        _mtls = (" + mTLS required" if args.tls_require_client_cert
+                 else " + mTLS optional" if args.tls_ca else "")
+        print(f"  TLS       : enabled{_mtls}")
+    print(f"  API prefix: {_scheme}://{args.host}:{args.port}{_API_V1}/")
     _dash_host = "localhost" if args.host in ("0.0.0.0", "::") else args.host
-    print(f"  Dashboard : http://{_dash_host}:{args.port}/dashboard")
-    print(f"  API docs  : http://{_dash_host}:{args.port}{_API_V1}/docs")
+    print(f"  Dashboard : {_scheme}://{_dash_host}:{args.port}/dashboard")
+    print(f"  API docs  : {_scheme}://{_dash_host}:{args.port}{_API_V1}/docs")
     print("\n  Press Ctrl-C to stop.\n")
 
+    _handle_termination_signals()
     try:
         while True:
             time.sleep(1)
@@ -222,6 +254,7 @@ def cmd_agent_start(args: argparse.Namespace) -> None:
     print(f"  Joined   : {agent.joined}")
     print("\n  Press Ctrl-C to stop.\n")
 
+    _handle_termination_signals()
     try:
         while True:
             time.sleep(1)
@@ -340,6 +373,25 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Add an API key with a role (admin or viewer); repeatable, "
                          "e.g. --api-key secret123=admin --api-key view456=viewer. "
                          "If never given, the API is open (no auth).")
+    ms.add_argument("--tls-cert", default=None, metavar="PATH",
+                    help="Path to a TLS certificate file. Enables HTTPS; "
+                         "requires --tls-key. Omit for plain HTTP (default).")
+    ms.add_argument("--tls-key", default=None, metavar="PATH",
+                    help="Path to the TLS private key file (paired with --tls-cert).")
+    ms.add_argument("--tls-ca", default=None, metavar="PATH",
+                    help="Path to a CA bundle used to verify client certificates "
+                         "(enables mTLS). Optional unless --tls-require-client-cert.")
+    ms.add_argument("--tls-require-client-cert", action="store_true",
+                    help="Reject connections that don't present a client "
+                         "certificate signed by --tls-ca (mTLS enforcement).")
+    ms.add_argument("--state-file", default=None, metavar="PATH",
+                    help="Persist the node registry to this path, restored on "
+                         "restart. Without this, a restarted master starts "
+                         "with an empty registry (nodes self-heal via "
+                         "re-heartbeat, but status/metadata is lost meanwhile).")
+    ms.add_argument("--state-save-interval", type=float, default=5.0,
+                    help="Seconds between registry snapshots while running "
+                         "(default: 5.0). Ignored without --state-file.")
     ms.set_defaults(func=cmd_master_start)
 
     # agent

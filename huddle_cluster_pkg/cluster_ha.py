@@ -39,7 +39,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
+import tempfile
 import threading
 import time
 import urllib.error
@@ -77,6 +79,7 @@ class ClusterHA:
         heartbeat_interval_sec: float = 0.5,
         sync_interval_sec: float = 1.0,
         request_timeout_sec: float = 1.0,
+        state_file: Optional[str] = None,
     ) -> None:
         """
         Args:
@@ -92,6 +95,15 @@ class ClusterHA:
             sync_interval_sec:      How often the leader pushes full state
                                     snapshots to followers.
             request_timeout_sec:    HTTP timeout for peer RPC calls.
+            state_file:             Path to persist Raft term/voted_for
+                                    across restarts (atomic write, same
+                                    pattern as HuddleCluster.save_state()).
+                                    Without this, term/voted_for are
+                                    in-memory only — a restarted node can
+                                    revote in a term it already voted in,
+                                    which is a real (if narrow) Raft safety
+                                    violation. Strongly recommended for any
+                                    production HA deployment.
         """
         self._id               = node_id
         self._peers            = list(peers or [])
@@ -99,14 +111,19 @@ class ClusterHA:
         self._hb_interval      = heartbeat_interval_sec
         self._sync_interval    = sync_interval_sec
         self._rpc_timeout      = request_timeout_sec
+        self._state_file       = state_file
+        self._state_write_lock = threading.Lock()
 
-        #  Raft persistent state (simplified — in-memory) 
+        #  Raft persistent state 
         self._term             = 0
         self._voted_for: Optional[str] = None
         self._role             = FOLLOWER
         self._leader_id: Optional[str] = None
         self._leader_url: Optional[str] = None
         self._votes_received: set = set()
+
+        if self._state_file:
+            self._load_persisted_state()
 
         #  Timing 
         self._last_hb          = time.time()
@@ -163,6 +180,65 @@ class ClusterHA:
         self._running = False
 
     
+    # Persistence — Raft term/voted_for survive a process restart
+    
+
+    def _load_persisted_state(self) -> None:
+        try:
+            with open(self._state_file, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            self._term      = int(data.get("term", 0))
+            self._voted_for = data.get("voted_for")
+            logger.info(
+                "HA '%s': restored persisted state from %s (term=%d, voted_for=%r)",
+                self._id, self._state_file, self._term, self._voted_for,
+            )
+        except FileNotFoundError:
+            pass   # first run — nothing to restore
+        except (json.JSONDecodeError, ValueError, OSError) as e:
+            logger.warning(
+                "HA '%s': could not read state_file %s (%s) — "
+                "starting from term 0 as if fresh. If this master previously "
+                "voted, it may be eligible to vote again in an old term.",
+                self._id, self._state_file, e,
+            )
+
+    def _persist(self) -> None:
+        """Atomically write {term, voted_for} to state_file. Caller must
+        hold self._lock (so the values read here are consistent), but the
+        actual file write happens outside contention on _state_write_lock.
+        No-op if state_file wasn't configured."""
+        if not self._state_file:
+            return
+        payload = {"term": self._term, "voted_for": self._voted_for}
+        with self._state_write_lock:
+            tmp_path = None
+            try:
+                target_dir = os.path.dirname(os.path.abspath(self._state_file))
+                os.makedirs(target_dir, exist_ok=True)
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".tmp", dir=target_dir,
+                    delete=False, encoding="utf-8",
+                ) as fh:
+                    tmp_path = fh.name
+                    json.dump(payload, fh)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp_path, self._state_file)
+                tmp_path = None
+            except OSError as e:
+                logger.error(
+                    "HA '%s': failed to persist Raft state to %s: %s",
+                    self._id, self._state_file, e,
+                )
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+
+    
     # Public read-only state
     
 
@@ -213,6 +289,7 @@ class ClusterHA:
             )
             if can_vote:
                 self._voted_for = candidate_id
+                self._persist()
                 self._reset_timeout()
                 logger.info(
                     "HA '%s': voted for '%s' in term %d",
@@ -314,6 +391,7 @@ class ClusterHA:
             self._term        += 1
             self._role         = CANDIDATE
             self._voted_for    = self._id
+            self._persist()
             self._votes_received = {self._id}   # vote for self
             self._leader_id   = None
             self._leader_url  = None
@@ -357,9 +435,29 @@ class ClusterHA:
             self._leader_id    = self._id
             self._leader_url   = getattr(self, "_self_url", None)
             self._reset_timeout()
+            term = self._term
         logger.info(
             "HA '%s': became LEADER for term %d", self._id, self._term
         )
+        # Push state immediately rather than waiting for the next
+        # _sync_loop tick — otherwise a freshly-elected leader that
+        # crashes within sync_interval_sec could hand leadership to a
+        # follower still holding stale state (a real, if narrow,
+        # leader-completeness gap in this snapshot-replication model).
+        snapshot = self._build_snapshot()
+        for peer_url in self._peers:
+            try:
+                self._rpc_post(
+                    peer_url + "/v1/ha/sync",
+                    {
+                        "leader_id":      self._id,
+                        "leader_url":     getattr(self, "_self_url", ""),
+                        "term":           term,
+                        "state_snapshot": snapshot,
+                    },
+                )
+            except Exception:
+                pass   # peer unreachable — regular _sync_loop will retry
 
 
     # Heartbeat loop (leader only)
@@ -430,6 +528,7 @@ class ClusterHA:
         self._term       = new_term
         self._role       = FOLLOWER
         self._voted_for  = None
+        self._persist()
         self._leader_id  = None
         self._leader_url = None
         self._reset_timeout()

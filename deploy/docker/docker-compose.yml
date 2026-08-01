@@ -1,0 +1,80 @@
+# HuddleCluster — local multi-node cluster via docker-compose.
+#
+#   cd deploy/docker && docker compose up --build
+#   curl http://localhost:7070/v1/nodes
+#   open http://localhost:7070/dashboard
+#
+# This is a local dev/demo topology, not a production deployment —
+# for production, run the master with TLS + api_keys + state_file (see
+# docs/CLUSTER.md), and agents on separate hosts/pods, not sidecar
+# containers on one Docker network.
+
+services:
+  master:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    command:
+      - master
+      - start
+      - --port=7070
+      - --api-key=demo-admin-key=admin
+      - --state-file=/var/lib/huddle/registry.json
+    ports:
+      - "7070:7070"
+    volumes:
+      - master-state:/var/lib/huddle
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:7070/v1/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  agent-1:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    command:
+      - agent
+      - start
+      - --id=agent-1
+      - --master=http://master:7070
+      - --port=8080
+      - --api-key=demo-admin-key
+    depends_on:
+      master:
+        condition: service_healthy
+
+  agent-2:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    command:
+      - agent
+      - start
+      - --id=agent-2
+      - --master=http://master:7070
+      - --port=8080
+      - --api-key=demo-admin-key
+    depends_on:
+      master:
+        condition: service_healthy
+
+  agent-3:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    command:
+      - agent
+      - start
+      - --id=agent-3
+      - --master=http://master:7070
+      - --port=8080
+      - --api-key=demo-admin-key
+    depends_on:
+      master:
+        condition: service_healthy
+
+volumes:
+  master-state:

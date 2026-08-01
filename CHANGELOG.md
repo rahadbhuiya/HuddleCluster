@@ -5,6 +5,285 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.10.0] - 2026-07-29
+
+### Added — Level 5: Production Hardening (7/8) — WAN-latency simulation benchmark
+
+**Benchmarks**
+- `benchmarks/benchmark_wan.py` (new): real-HTTP benchmark (same style
+  as `benchmark_http.py`) against 6 simulated regions with
+  region-realistic one-way latency (8ms same-region up to 110ms
+  cross-continent), jitter proportional to latency, and 1% simulated
+  packet loss per request — compares HuddleCluster vs Round Robin
+  under WAN-like conditions instead of loopback's tight 12-22ms range
+- `benchmarks/upstream_server.py`: added optional `--jitter` and
+  `--loss-pct` CLI params (backward compatible — both default to the
+  prior fixed behavior, so `benchmark_http.py`/`benchmark_industry.py`
+  etc. are unaffected)
+- `--use-netem` flag attempts kernel-level `tc netem` instead of
+  application-level sleep-based simulation, with a runtime
+  availability probe and clean fallback — confirmed in this repo's
+  dev container that netem is *not* available (`tc qdisc add ...
+  netem` fails: "Specified qdisc kind is unknown" — no
+  `sch_netem` kernel module) — so the default path is application-level
+
+**Honesty note, stated in both the script's docstring and
+`docs/CLUSTER.md`:** this is a real, run benchmark (see actual sample
+results in `docs/CLUSTER.md`'s new "WAN / high-latency benchmark"
+subsection), but it simulates WAN latency/jitter/loss characteristics
+on one host over loopback — it validates HuddleCluster's *algorithm*
+under those characteristics, not real cross-region network behavior.
+Full multi-region validation needs servers actually deployed across
+cloud regions, which is out of scope for this repo/session. This is
+explicitly the item, of the 8 production-readiness gaps identified,
+that could only be *partially* closed rather than fixed outright — see
+the docstring and docs section for the complete reasoning rather than
+overclaiming "WAN validated" here.
+
+**Docs**
+- `docs/CLUSTER.md`: new "WAN / high-latency benchmark" subsection
+  under Running Benchmarks, including a real sample result table
+
+---
+
+## [4.9.0] - 2026-07-29
+
+### Added — Level 5: Production Hardening (6/N) — Docker + Kubernetes deployment
+
+**Deployment** (`deploy/`, new directory)
+- `deploy/docker/Dockerfile` — multi-stage (build wheel → slim runtime),
+  runs as a non-root user, one image serves both `master` and `agent`
+  roles via CLI args. Verified end-to-end in this repo: wheel builds,
+  installs cleanly into a fresh venv, `huddle-cluster master start`
+  serves real traffic
+- `deploy/docker/docker-compose.yml` — local demo: 1 master + 3 agents
+  with a healthcheck-gated startup order
+- `deploy/k8s/master.yaml` — single-replica Deployment (`Recreate`
+  strategy so two masters never write the same PVC concurrently),
+  PersistentVolumeClaim for `--state-file`, Secret for the API key,
+  readiness/liveness probes against `/v1/health`, resource
+  requests/limits
+- `deploy/k8s/agent-daemonset.yaml` — one agent per node via
+  DaemonSet, node identity from `spec.nodeName`
+
+**CLI fixes found and fixed while building/testing the above**
+- `huddle-cluster master start` was missing `--state-file` /
+  `--state-save-interval` entirely — the v4.5.0 persistence feature
+  was only reachable from the Python API, not the CLI. Added both,
+  plus a `Persist:` line in the startup banner
+- **Real bug:** the CLI only handled `KeyboardInterrupt` (Ctrl-C /
+  SIGINT) for graceful shutdown. `docker stop` and Kubernetes pod
+  termination send `SIGTERM`, which was previously an unhandled hard
+  kill — meaning `--state-file`'s final snapshot-on-stop (v4.5.0)
+  would never actually run in a container. New
+  `_handle_termination_signals()` translates SIGTERM into the same
+  graceful-stop path as Ctrl-C, for both `master start` and
+  `agent start`. Verified with a real `kill -TERM` against a running
+  process — snapshot file is written correctly
+
+**Docs**
+- New "Deployment" section in `docs/CLUSTER.md` (before Running
+  Tests), including an explicit "what this does *not* give you" list
+  (no Helm chart, no published image, no HA wiring in the manifests,
+  no network policies/ingress, not K8s-scale load-tested)
+
+**Notes**
+- No new automated tests for the Dockerfile/K8s manifests themselves
+  (no `docker`/`kubectl` available in this sandbox to run them against
+  a real daemon) — verified instead by building the wheel, installing
+  it into a clean venv, and exercising the actual CLI commands the
+  container runs, plus a manual `kill -TERM` for the SIGTERM fix
+
+---
+
+## [4.8.0] - 2026-07-29
+
+### Added — Level 5: Production Hardening (5/N) — OTLP log export
+
+**ClusterObservability**
+- New `otlp_endpoint`/`otlp_headers`/`otlp_flush_interval_sec`/
+  `otlp_timeout_sec` constructor params. When `otlp_endpoint` is set,
+  buffered events are exported to `{endpoint}/v1/logs` as OTLP logs
+  (JSON encoding) on a background daemon thread — no
+  `opentelemetry-*`/protobuf/grpc dependency needed, just `urllib`
+- Best-effort and non-blocking: export failures are logged and retried
+  next interval; never raised into request-handling code, never drop
+  events (stay in the local ring buffer, subject to normal
+  `buffer_size` eviction, until a send succeeds)
+- `stop()` now performs a final flush so events recorded just before
+  shutdown aren't silently lost
+- `summary()` (and `GET /v1/observability/status`) report
+  `otlp.exported_count`, `otlp.error_count`, `otlp.last_error` when
+  OTLP export is enabled
+- Fully backward compatible — omitting `otlp_endpoint` behaves exactly
+  as v4.3.0 (local buffer + JSON logs only, no network calls)
+
+**Docs**
+- New "Observability" section in `docs/CLUSTER.md` (this had been
+  undocumented in CLUSTER.md since v4.3.0 — added the base
+  trace-ID/JSON-logging behavior alongside the new OTLP piece)
+
+**Tests** (`tests/test_cluster_observability_otlp.py`, new file, 10 tests)
+- Uses a real tiny in-process HTTP server as a fake OTLP collector
+  (not a urllib mock) — verifies the actual request shape, headers,
+  resource/service.name, no-duplicate-export-after-success, retry
+  after a transient collector failure, and stop()-triggers-final-flush
+- Full `test_cluster_observability.py` (36) + new file (10) re-run
+  clean together, no regressions (46 tests)
+
+---
+
+## [4.7.0] - 2026-07-29
+
+### Added — Level 5: Production Hardening (4/N) — HA failover staleness fix + honest limitations doc
+
+**ClusterHA**
+- `_become_leader()` now pushes a full state snapshot to all followers
+  immediately upon winning an election, instead of waiting for the next
+  `_sync_loop` tick (previously up to `sync_interval_sec` — default
+  1s, but configurable much higher). This closes most of the window
+  where a second failure right after a failover could hand leadership
+  to a follower still holding stale state
+- This is **not** a claim of full Raft log-based consistency — see the
+  new "Honest limitations" subsection below
+
+**Docs**
+- `docs/CLUSTER.md`: new "Honest limitations" subsection under
+  High-Availability Master, explicitly documenting what this simplified
+  Raft does *not* provide (log-based replication/commit index, cluster
+  membership changes, independent chaos-testing) rather than
+  overclaiming "hardened"
+
+**Tests**
+- `tests/test_cluster_ha_sync_on_election.py` (new): verifies a
+  follower receives the leader's pre-election state well within 0.5s
+  of a leader emerging, even with `sync_interval_sec=20.0` — would fail
+  without the immediate post-election push
+- Full `test_cluster_ha.py` + `test_cluster_ha_persistence.py` +
+  new file re-run clean (37 tests)
+
+---
+
+## [4.6.0] - 2026-07-29
+
+### Added — Level 5: Production Hardening (3/N) — mTLS node identity
+
+**MasterNode**
+- `NodeRecord` gained a `tls_client_cn` field: when a node joins over a
+  connection with a verified client certificate (`tls_ca_certs`
+  configured on the master), the certificate's Common Name is captured
+  and recorded on that node's record — a non-replayable identity signal
+  that complements (not replaces) `api_keys`/RBAC for authorization
+- New `_tls_client_cn()` handler helper reads the peer certificate off
+  the live TLS connection via `ssl.SSLSocket.getpeercert()`; returns
+  `None` over plain HTTP or when no client cert was presented
+- `_handle_join()` gained a `tls_client_cn` parameter; threaded through
+  on both the new-node and re-join paths
+- Fully backward compatible — `tls_client_cn` defaults to `None` and
+  existing persisted registry snapshots (pre-v4.6.0) load fine since
+  it's an optional dataclass field
+
+**Docs**
+- New "Node identity via mTLS" subsection under TLS/HTTPS in
+  `docs/CLUSTER.md`, with the explicit scope note that this is an audit
+  trail today, not (yet) an authorization mechanism
+
+**Tests** (`tests/test_master_tls.py`, +2 tests, 10 total in file)
+- mTLS join records the client cert CN on the resulting `NodeRecord`
+- Plain-HTTP join leaves `tls_client_cn` as `None`
+- Full `test_cluster_master.py` + `test_master_tls.py` +
+  `test_master_registry_persistence.py` re-run clean (131 tests)
+
+---
+
+## [4.5.0] - 2026-07-29
+
+### Added — Level 5: Production Hardening (2/N) — state persistence
+
+**ClusterHA** (`huddle_cluster_pkg.cluster_ha`)
+- New `state_file` constructor param: persists Raft `term`/`voted_for`
+  to disk (atomic write: tmp file + `fsync` + `os.replace`), written
+  synchronously on every vote grant, election start, and step-down
+- Restores `term`/`voted_for` on construction if `state_file` exists
+- Fixes a real (if narrow) Raft safety gap: without this, a restarted
+  HA node forgot it had already voted in a term and could vote again,
+  a double-vote that Raft's safety proof depends on not happening
+- Corrupt/unreadable state files fall back to term 0 with a warning
+  rather than crashing
+
+**MasterNode** (`huddle_cluster_pkg.cluster_master`)
+- New `state_file` / `state_save_interval_sec` (default 5.0) constructor
+  params: periodically snapshots the full node registry to disk (atomic
+  write, same pattern), plus once more on graceful `stop()`
+- Restores the registry on `start()` if `state_file` exists; restored
+  nodes keep their last-known status, and the existing heartbeat-timeout
+  logic naturally re-evaluates liveness within one timeout window
+- Explicitly *not* persisted (documented, deliberate): circuit breaker
+  trip state, rate limiter buckets, canary rollout progress — these are
+  short-lived/self-correcting, so restart-loses-it is an acceptable
+  tradeoff for now
+
+**Docs**
+- New "Persistence" section in `docs/CLUSTER.md` (before TLS/HTTPS)
+
+**Tests**
+- `tests/test_cluster_ha_persistence.py` (new, 11 tests): atomic write,
+  restart restores term/voted_for, corrupt-file fallback, and the core
+  safety test — restart does not allow a double-vote in the same term
+- `tests/test_master_registry_persistence.py` (new, 9 tests): snapshot
+  on stop, periodic snapshot while running, restart restores nodes
+  (including status/metadata), corrupt/missing file handling, atomic
+  write, parent-directory creation
+- Full existing suite (`test_cluster_master.py`, `test_cluster_ha.py`)
+  re-run clean, no regressions (157 tests across all four files)
+
+---
+
+## [4.4.0] - 2026-07-29
+
+### Added — Level 5: Production Hardening (1/N) — TLS/HTTPS + threaded server
+
+**MasterNode**
+- New constructor params: `tls_certfile`, `tls_keyfile`, `tls_ca_certs`,
+  `tls_require_client_cert`. When `tls_certfile`/`tls_keyfile` are given,
+  the master's HTTP listener terminates TLS itself — no reverse proxy
+  required just for encryption. `tls_ca_certs` + `tls_require_client_cert`
+  enables mTLS: the master verifies (and can require) a client
+  certificate on every connection, which is a stronger, non-replayable
+  node identity than an API key alone
+- `tls_certfile` and `tls_keyfile` must be given together
+  (`ValueError` otherwise); `tls_require_client_cert=True` requires
+  `tls_ca_certs` (`ValueError` otherwise)
+- Swapped `http.server.HTTPServer` for `http.server.ThreadingHTTPServer`
+  — the master previously handled one HTTP request at a time; large
+  fleets doing frequent heartbeats could bottleneck the control plane.
+  All existing state mutations were already guarded by `self._lock`
+  (`threading.RLock`), so this is a safe, non-breaking change
+- Fully backward compatible — omitting the `tls_*` params behaves
+  exactly as before (plain HTTP)
+
+**CLI**
+- `huddle-cluster master start` gained `--tls-cert`, `--tls-key`,
+  `--tls-ca`, `--tls-require-client-cert`; startup banner now prints
+  `https://` URLs and TLS/mTLS status when enabled
+
+**Docs**
+- New "TLS / HTTPS" section in `docs/CLUSTER.md` (right after
+  Authentication) covering server-cert-only HTTPS and mTLS, with
+  Python and CLI examples
+
+**Tests** (`tests/test_master_tls.py`, new file, skipped if `openssl`
+CLI unavailable)
+- 8 tests: plain HTTPS, cert verification against a CA, plain HTTP
+  rejected on a TLS-only port, certfile/keyfile pairing validation,
+  require-client-cert-without-ca validation, mTLS rejects a connection
+  with no/wrong client cert, mTLS accepts a valid client cert, and a
+  regression check that TLS-less masters are unaffected
+- Full existing suite (869 tests as of v4.3.0) re-run clean after the
+  `ThreadingHTTPServer` swap, no regressions
+
+---
+
 ## [4.3.0] - 2026-07-28
 
 ### Added — Level 4: Observability & Control Plane — COMPLETE (4/4)

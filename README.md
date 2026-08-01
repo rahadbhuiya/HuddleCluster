@@ -158,6 +158,13 @@ Under server failure, P95 latency stays under **86 ms** where NGINX round-robin 
 - Rate Limiter — per-node token bucket, burst protection, scheduler exclusion — v4.1
 - Canary Deployment — weight-based traffic splitting, start/advance/promote/abort — v4.2
 - Observability — structured JSON logging, distributed trace IDs — v4.3, Level 4 complete
+- TLS/HTTPS + mTLS, threaded HTTP server — v4.4, Level 5 (Production Hardening) in progress
+- State persistence — HA term/voted_for + node registry survive restarts — v4.5
+- mTLS node identity — client cert CN recorded on join — v4.6
+- HA failover staleness fix + documented Raft limitations — v4.7
+- OTLP log export (Jaeger/Tempo/OTel Collector compatible) — v4.8
+- Docker + Kubernetes deployment manifests, SIGTERM graceful shutdown fix — v4.9
+- WAN-latency simulation benchmark (partial — see docs for scope) — v4.10, Level 5 complete (7/7 addressed; 2 items — Raft hardening and WAN validation — improved but honestly still partial, see docs/CLUSTER.md)
 
 ---
 
