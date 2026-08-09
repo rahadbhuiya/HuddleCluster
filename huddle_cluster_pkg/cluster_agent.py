@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import socket
+import ssl
 import threading
 import time
 import urllib.error
@@ -78,6 +79,10 @@ class AgentNode:
         request_timeout_sec: float = DEFAULT_REQUEST_TIMEOUT,
         metadata: Optional[Dict[str, Any]] = None,
         api_key: Optional[str] = None,
+        tls_verify: bool = True,
+        tls_ca_certs: Optional[str] = None,
+        tls_client_cert: Optional[str] = None,
+        tls_client_key: Optional[str] = None,
         on_master_unreachable: Optional[Callable[[], None]] = None,
         on_recovered: Optional[Callable[[], None]] = None,
     ) -> None:
@@ -97,6 +102,8 @@ class AgentNode:
         self._request_timeout = request_timeout_sec
         self._metadata = metadata or {}
         self._api_key  = api_key
+        self._ssl_context = self._build_ssl_context(
+            tls_verify, tls_ca_certs, tls_client_cert, tls_client_key)
         self._on_unreachable = on_master_unreachable
         self._on_recovered   = on_recovered
 
@@ -193,6 +200,46 @@ class AgentNode:
             "consecutive_failures": self._consecutive_failures,
             "metadata":             self._metadata,
         }
+
+    
+    # Internal — TLS setup
+    
+
+    @staticmethod
+    def _build_ssl_context(
+        tls_verify: bool,
+        tls_ca_certs: Optional[str],
+        tls_client_cert: Optional[str],
+        tls_client_key: Optional[str],
+    ) -> Optional[ssl.SSLContext]:
+        """
+        Build an SSLContext for connecting to an HTTPS master. Returns
+        None for the all-defaults case (verify against the system trust
+        store, no client cert) — urllib does that itself without a
+        context, so there's no need to build one. Ignored entirely for
+        http:// masters.
+        """
+        if tls_verify and not tls_ca_certs and not tls_client_cert:
+            return None   # default behavior — let urlopen use its own default context
+
+        ctx = ssl.create_default_context(cafile=tls_ca_certs)
+        if not tls_verify:
+            # For self-signed/dev certs. NEVER do this against a real
+            # production master over an untrusted network — it defeats
+            # TLS's protection against man-in-the-middle. Use
+            # tls_ca_certs (point at the CA/cert that signed the
+            # master's certificate) instead, whenever possible.
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        if tls_client_cert:
+            ctx.load_cert_chain(
+                certfile=tls_client_cert, keyfile=tls_client_key)
+        return ctx
+
+    def _urlopen(self, req: urllib.request.Request, timeout: float):
+        if self._ssl_context is not None:
+            return urllib.request.urlopen(req, timeout=timeout, context=self._ssl_context)
+        return urllib.request.urlopen(req, timeout=timeout)
 
     
     # Internal — join
@@ -339,7 +386,7 @@ class AgentNode:
         if self._api_key:
             req.add_header("Authorization", f"Bearer {self._api_key}")
         try:
-            with urllib.request.urlopen(req, timeout=self._request_timeout):
+            with self._urlopen(req, self._request_timeout):
                 pass
             logger.info("AgentNode '%s' deregistered from master", self._node_id)
         except Exception as exc:
@@ -365,7 +412,7 @@ class AgentNode:
         if self._api_key:
             req.add_header("Authorization", f"Bearer {self._api_key}")
         try:
-            with urllib.request.urlopen(req, timeout=self._request_timeout) as resp:
+            with self._urlopen(req, self._request_timeout) as resp:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as exc:
             # Master IS reachable but returned 4xx/5xx — read the JSON body.
@@ -376,7 +423,19 @@ class AgentNode:
                 return {"ok": False, "error": str(exc)}
         except urllib.error.URLError as exc:
             # Connection refused, network timeout, DNS failure — master is DOWN.
-            logger.debug("POST %s failed (master unreachable): %s", url, exc)
+            reason = getattr(exc, "reason", exc)
+            if isinstance(reason, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(exc):
+                logger.warning(
+                    "POST %s failed: TLS certificate verification failed (%s). "
+                    "If the master is using a self-signed certificate, pass "
+                    "tls_ca_certs=<path to the master's cert/CA> (preferred) "
+                    "or tls_verify=False (dev/testing only — this disables "
+                    "protection against man-in-the-middle attacks) when "
+                    "constructing AgentNode.",
+                    url, reason,
+                )
+            else:
+                logger.debug("POST %s failed (master unreachable): %s", url, exc)
             return None
         except Exception as exc:
             logger.debug("POST %s unexpected error: %s", url, exc)

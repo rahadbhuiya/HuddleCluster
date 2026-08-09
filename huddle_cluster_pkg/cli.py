@@ -243,6 +243,10 @@ def cmd_agent_start(args: argparse.Namespace) -> None:
         heartbeat_interval_sec=args.interval,
         metadata=meta,
         api_key=args.api_key,
+        tls_verify=not args.tls_no_verify,
+        tls_ca_certs=args.tls_ca,
+        tls_client_cert=args.tls_client_cert,
+        tls_client_key=args.tls_client_key,
     )
     agent.start(retry=args.retry)
 
@@ -250,6 +254,11 @@ def cmd_agent_start(args: argparse.Namespace) -> None:
     print(f"  Node ID  : {args.id}")
     print(f"  Address  : {agent.address}:{args.port}")
     print(f"  Master   : {args.master}")
+    if args.master.startswith("https://"):
+        _tls_mode = ("no verification (dev/testing only!)" if args.tls_no_verify
+                     else f"verified against {args.tls_ca}" if args.tls_ca
+                     else "verified against system trust store")
+        print(f"  TLS      : {_tls_mode}")
     print(f"  HB every : {args.interval}s")
     print(f"  Joined   : {agent.joined}")
     print("\n  Press Ctrl-C to stop.\n")
@@ -416,6 +425,19 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Metadata key=value pairs, e.g. --meta region=us-east role=lb")
     ag.add_argument("--api-key",  default=None,
                     help="API key to authenticate with the master, if it requires auth")
+    ag.add_argument("--tls-ca", default=None, metavar="PATH",
+                    help="Path to the master's certificate (or the CA that "
+                         "signed it), to verify an HTTPS master's identity. "
+                         "Preferred over --tls-no-verify for a self-signed cert.")
+    ag.add_argument("--tls-no-verify", action="store_true",
+                    help="Skip TLS certificate verification entirely when "
+                         "the master is HTTPS. Dev/testing only — this "
+                         "disables protection against man-in-the-middle "
+                         "attacks. Prefer --tls-ca for a self-signed master cert.")
+    ag.add_argument("--tls-client-cert", default=None, metavar="PATH",
+                    help="Client certificate for mTLS, if the master requires one.")
+    ag.add_argument("--tls-client-key", default=None, metavar="PATH",
+                    help="Client private key for mTLS (paired with --tls-client-cert).")
     ag.set_defaults(func=cmd_agent_start)
 
     # nodes

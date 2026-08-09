@@ -255,6 +255,18 @@ class ClusterAutoScaler:
             )
 
         #  cooldown guard 
+        # Keep the raw (pre-cooldown) decision/reason around separately —
+        # these are what we report as "last_decision"/"last_reason", since
+        # that's meant to answer "what does the autoscaler currently think
+        # should happen", not "did we just fire an action this exact tick".
+        # Without this distinction, a condition that's been true for a
+        # while (e.g. alive_nodes still below min_nodes) would flicker
+        # last_decision back to "none" on every cooldown-suppressed tick,
+        # even though the underlying condition never went away — which
+        # made the REST status/dashboard misleadingly look "healthy"
+        # between cooldown-gated firings.
+        raw_decision, raw_reason = decision, reason
+
         if decision == SCALE_UP:
             if now - self._last_scale_up_ts < self.scale_up_cooldown_sec:
                 wait = self.scale_up_cooldown_sec - (now - self._last_scale_up_ts)
@@ -291,8 +303,8 @@ class ClusterAutoScaler:
                     logger.exception("on_scale_down callback raised")
 
         with self._lock:
-            self._last_decision = decision
-            self._last_reason   = reason
+            self._last_decision = raw_decision
+            self._last_reason   = raw_reason
 
         return decision
 

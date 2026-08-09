@@ -5,6 +5,112 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.12.0] - 2026-08-05
+
+### Fixed — ClusterAutoScaler.status() misreported last_decision/last_reason during cooldown
+
+**Reported symptom:** a user running the interactive autoscaler demo
+killed a node to trigger scale-up (alive_nodes below min_nodes). The
+`on_scale_up` callback fired repeatedly and `history`/`scale_event_count`
+in `status()` correctly showed multiple scale-up events — but the
+top-level `last_decision`/`last_reason` fields showed `"none"`/`""`
+the entire time, even while the scale-up condition was clearly still
+active. This made `GET /v1/autoscaler/status` (and any dashboard/
+monitoring built on it) misleadingly look healthy between cooldown-
+gated firings.
+
+**Root cause:** `evaluate()` computed the real decision (e.g.
+`SCALE_UP`) from the alive-node/heat conditions, then a cooldown guard
+would locally reset that same `decision`/`reason` variable to
+`SCALE_NONE`/`""` on ticks where the cooldown hadn't expired yet (to
+correctly suppress firing a *new* action). The bug: `last_decision`/
+`last_reason` were assigned from those same, now-overwritten
+variables — so any cooldown-suppressed tick blew away the correct
+"scale_up condition is still active" state, even though nothing about
+the underlying condition had changed.
+
+**Fix:** capture the raw (pre-cooldown) decision/reason in separate
+variables before the cooldown guard runs, and report those via
+`last_decision`/`last_reason`. The cooldown-gated variables are still
+used for whether to actually fire `_record()`/`on_scale_up`/
+`on_scale_down` this tick — unchanged — and `evaluate()`'s return
+value is unchanged (still `SCALE_NONE` on a cooldown-suppressed tick,
+since no new action was taken). Only the *reporting* of "what does the
+autoscaler currently think should happen" was wrong, and only that
+changed.
+
+**Tests** (`tests/test_cluster_autoscaler.py`, +3 tests, 32 total in file)
+- Regression test reproducing the exact reported scenario: evaluate
+  twice with the same alive_nodes below min_nodes and a long cooldown;
+  `last_decision` must stay `SCALE_UP` with the reason preserved on
+  the second (cooldown-suppressed) call, even though the call's return
+  value is correctly `SCALE_NONE`
+- Companion test confirming `last_decision` genuinely reports `SCALE_NONE`
+  once the condition actually clears (not just cooldown-suppressed)
+- Same regression for the scale-down direction
+- Full `test_cluster_autoscaler.py` re-run clean, no regressions (32 tests)
+
+---
+
+## [4.11.0] - 2026-08-01
+
+### Fixed — AgentNode couldn't join an HTTPS master with a self-signed certificate
+
+**Reported symptom:** a real user pointed a freshly-generated agent at a
+master started with `--tls-cert`/`--tls-key` (self-signed dev cert) and
+got `Join rejected by master: None` in an infinite retry loop, with no
+indication of why.
+
+**Root cause:** `AgentNode` had no TLS trust configuration at all —
+`urllib.request.urlopen()` was called with Python's default SSL
+context, which verifies against the system trust store and correctly
+rejects a self-signed certificate. That failure (`URLError` wrapping an
+`SSLCertVerificationError`) was caught by the same branch as "master
+unreachable" and logged at `debug` level — invisible unless debug
+logging was explicitly enabled — then surfaced as a bare `None`,
+indistinguishable from a network-down condition.
+
+**Fix:**
+- `AgentNode` gained `tls_verify` (default `True`), `tls_ca_certs`,
+  `tls_client_cert`, `tls_client_key` constructor params. Builds an
+  `ssl.SSLContext` once and threads it through all three `urlopen()`
+  call sites (join, heartbeat, leave) via a shared `_urlopen()` helper
+- `tls_ca_certs` (recommended): verify the master's cert against a
+  specific CA/cert file instead of the system trust store — the
+  correct fix for a self-signed or internal-CA master cert
+- `tls_verify=False` (dev/testing only, documented as such): skip
+  verification entirely
+- `tls_client_cert`/`tls_client_key`: present a client certificate for
+  mTLS, if the master requires one (pairs with the master's
+  `tls_require_client_cert` from v4.4.0)
+- TLS certificate verification failures are now logged at `warning`
+  level with an actionable message (which param to set), instead of a
+  swallowed `debug`-level line — this alone would have made the
+  original symptom immediately diagnosable
+- CLI: `huddle-cluster agent start` gained `--tls-ca`,
+  `--tls-no-verify`, `--tls-client-cert`, `--tls-client-key`; startup
+  banner prints the resolved TLS trust mode
+- Fully backward compatible — omitting all `tls_*` params behaves
+  exactly as before (plain HTTP unaffected; HTTPS against a
+  publicly-trusted cert unaffected, since the default case doesn't
+  build a custom SSLContext at all)
+
+**Docs**
+- New "Agent-side TLS configuration" subsection in `docs/CLUSTER.md`
+  (under TLS/HTTPS, before Node identity via mTLS), explaining exactly
+  the failure mode above and the three ways to resolve it
+
+**Tests** (`tests/test_agent_tls.py`, new file, 8 tests, skipped if
+`openssl` CLI unavailable)
+- Reproduces the exact reported bug (join fails against a self-signed
+  cert with default settings) as a named regression test, plus verifies
+  each fix path (`tls_ca_certs`, `tls_verify=False`, mTLS with client
+  cert) actually succeeds, plus a plain-HTTP regression guard
+- Full `test_cluster_agent.py` (32) + `test_master_tls.py` (10) +
+  new file (8) re-run clean, no regressions (50 tests)
+
+---
+
 ## [4.10.0] - 2026-07-29
 
 ### Added — Level 5: Production Hardening (7/8) — WAN-latency simulation benchmark

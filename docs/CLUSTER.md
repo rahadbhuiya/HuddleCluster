@@ -135,6 +135,13 @@ By default the master serves plain HTTP — fine for a private network, but
 v4.4.0 the master can terminate TLS itself, so a reverse proxy is no
 longer required just to get encryption:
 
+**No cert handy for local testing?** `python gen_cert.py` (repo root)
+generates a throwaway self-signed `server.crt`/`server.key` for
+`localhost`/`127.0.0.1` — pure Python (`cryptography` package), no
+`openssl` CLI required. Fine for trying TLS locally; don't use it for
+anything real (see [Agent-side TLS configuration](#agent-side-tls-configuration)
+for how to point an agent at it without disabling verification).
+
 ```python
 # HTTPS — server certificate only
 master = MasterNode(
@@ -175,6 +182,52 @@ Notes:
 - Certificate generation/rotation/renewal is out of scope here — bring
   your own certs (e.g. from your internal CA, `cert-manager`, or Let's
   Encrypt for a public master).
+
+### Agent-side TLS configuration
+
+If the master uses HTTPS, `AgentNode` needs to know whether/how to trust
+its certificate — this is a separate setting from the master's own
+`tls_*` params:
+
+```python
+from huddle_cluster_pkg import AgentNode
+
+# Recommended: point the agent at the master's cert (or the CA that
+# signed it). Verifies the master's identity properly.
+agent = AgentNode(
+    node_id="web-1", master_url="https://master:7070", port=8080,
+    tls_ca_certs="/etc/huddle/server.crt",
+)
+
+# Dev/testing only: skip verification entirely. Do NOT use this over an
+# untrusted network — it defeats TLS's protection against
+# man-in-the-middle attacks.
+agent = AgentNode(
+    node_id="web-1", master_url="https://master:7070", port=8080,
+    tls_verify=False,
+)
+
+# mTLS: present a client certificate if the master requires one
+# (tls_require_client_cert=True on the master side).
+agent = AgentNode(
+    node_id="web-1", master_url="https://master:7070", port=8080,
+    tls_ca_certs="/etc/huddle/server.crt",
+    tls_client_cert="/etc/huddle/agent.crt",
+    tls_client_key="/etc/huddle/agent.key",
+)
+```
+
+Or via the CLI: `--tls-ca`, `--tls-no-verify`, `--tls-client-cert`,
+`--tls-client-key` on `huddle-cluster agent start`.
+
+**If you skip this against a self-signed master cert:** the agent's
+`urlopen()` uses Python's default certificate verification (system
+trust store), which a self-signed cert fails. Versions before v4.11.0
+swallowed that failure into a bare `None` return with only a
+debug-level log line — join retries would fail silently with no
+actionable error. As of v4.11.0, TLS certificate verification failures
+are logged at `warning` level with a message pointing at `tls_ca_certs`/
+`tls_verify`, so this is diagnosable without turning on debug logging.
 
 ### Node identity via mTLS
 

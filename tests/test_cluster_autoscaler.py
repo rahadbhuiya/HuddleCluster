@@ -158,6 +158,62 @@ class TestAutoScalerEvaluate:
         decision = a.evaluate(alive_nodes=2, avg_heat=0.05)
         assert decision == SCALE_NONE
 
+    def test_last_decision_reflects_condition_not_cooldown_suppression(self):
+        """
+        Regression test: last_decision/last_reason must keep reporting
+        the underlying condition (e.g. "alive_nodes below min_nodes")
+        even on evaluation ticks where cooldown suppresses firing a new
+        action. Before this fix, a cooldown-suppressed tick overwrote
+        last_decision/last_reason back to "none"/"" — so a status check
+        made between two cooldown-gated firings misleadingly looked
+        healthy even though the scale-up condition was still active and
+        being evaluated as such.
+        """
+        a = _make_autoscaler(min_nodes=3, max_nodes=5, scale_up_cooldown_sec=100.0)
+
+        d1 = a.evaluate(alive_nodes=2)   # fires — condition true, no prior cooldown
+        assert d1 == SCALE_UP
+        s1 = a.status()
+        assert s1["last_decision"] == SCALE_UP
+        assert "alive_nodes (2) < min_nodes (3)" in s1["last_reason"]
+
+        # Condition is STILL true, but cooldown (100s) suppresses firing
+        # a second action on this tick.
+        d2 = a.evaluate(alive_nodes=2)
+        assert d2 == SCALE_NONE   # no new action fired this tick — correct
+        s2 = a.status()
+        # ...but last_decision must still reflect the real condition.
+        assert s2["last_decision"] == SCALE_UP
+        assert "alive_nodes (2) < min_nodes (3)" in s2["last_reason"]
+
+    def test_last_decision_is_none_when_condition_genuinely_clears(self):
+        """Companion to the above: once the condition actually clears
+        (not just cooldown-suppressed), last_decision should genuinely
+        report none."""
+        a = _make_autoscaler(min_nodes=3, max_nodes=5, scale_up_cooldown_sec=0)
+        a.evaluate(alive_nodes=2)
+        assert a.status()["last_decision"] == SCALE_UP
+
+        d = a.evaluate(alive_nodes=3)   # back within [min, max] — condition cleared
+        assert d == SCALE_NONE
+        s = a.status()
+        assert s["last_decision"] == SCALE_NONE
+        assert s["last_reason"] == ""
+
+    def test_scale_down_last_decision_survives_cooldown_suppression(self):
+        """Same regression, scale-down direction."""
+        a = _make_autoscaler(min_nodes=1, max_nodes=3, scale_down_cooldown_sec=100.0)
+
+        d1 = a.evaluate(alive_nodes=5)
+        assert d1 == SCALE_DOWN
+        assert a.status()["last_decision"] == SCALE_DOWN
+
+        d2 = a.evaluate(alive_nodes=5)   # cooldown suppresses the action
+        assert d2 == SCALE_NONE
+        s2 = a.status()
+        assert s2["last_decision"] == SCALE_DOWN
+        assert "alive_nodes (5) > max_nodes (3)" in s2["last_reason"]
+
     def test_no_action_when_healthy(self):
         a = _make_autoscaler(
             min_nodes=1, max_nodes=5,
