@@ -455,10 +455,14 @@ own browser's localStorage.
 huddle-cluster master start  [--host] [--port] [--timeout] [--flap-window]
                              [--flap-threshold] [--quarantine-recovery]
                              [--purge-after] [--api-key KEY=ROLE ...]
+                             [--tls-cert] [--tls-key] [--tls-ca] [--tls-require-client-cert]
+                             [--state-file] [--state-save-interval]
+                             [--features PATH_OR_JSON]
 
 huddle-cluster agent  start  --id ID --master URL --port PORT
                              [--address IP] [--interval SEC]
                              [--retry N] [--meta key=val ...] [--api-key KEY]
+                             [--tls-ca] [--tls-no-verify] [--tls-client-cert] [--tls-client-key]
 
 huddle-cluster nodes  list   [--master URL] [--api-key KEY]
                              [--status alive,quarantined] [--limit N] [--offset N]
@@ -469,6 +473,60 @@ huddle-cluster cluster health  [--master URL]
 huddle-cluster cluster metrics [--master URL] [--api-key KEY]
 huddle-cluster cluster openapi [--master URL]
 ```
+
+### CLI feature config (`--features`)
+
+As of v4.13.0, `--features` on `master start` enables the "advanced"
+features (circuit breaker, rate limiter, canary, autoscaler, service
+discovery, observability, HA) straight from the CLI, without writing
+any Python. It takes either a path to a `.json` file or an inline JSON
+string; each top-level key names a feature, and its value is passed as
+keyword arguments to that feature's constructor (same arguments as the
+Python API sections above).
+
+```bash
+huddle-cluster master start --port 7070 --features features.json
+```
+
+`features.json`:
+
+```json
+{
+  "circuit_breaker": { "trip_threshold": 0.5, "reset_timeout_sec": 60 },
+  "rate_limiter":    { "capacity": 100, "refill_rate": 50 },
+  "autoscaler":      { "min_nodes": 3, "max_nodes": 10 },
+  "observability":   { "service_name": "prod-master", "otlp_endpoint": "http://otel-collector:4318" },
+  "canary":          { "weight_steps": [5, 25, 50, 100] },
+  "service_discovery": { "dns_port": 8053 },
+  "ha": {
+    "node_id": "master-1",
+    "peers": ["http://master-2:7071", "http://master-3:7072"],
+    "state_file": "/var/lib/huddle/ha_state.json"
+  }
+}
+```
+
+Or inline, for a quick one-off:
+
+```bash
+huddle-cluster master start --port 7070 \
+  --features '{"autoscaler": {"min_nodes": 3, "max_nodes": 10}}'
+```
+
+Notes:
+- If `circuit_breaker`, `rate_limiter`, or `canary` is present, a
+  `ClusterScheduler` is automatically built and wired with them — that's
+  what makes `GET /v1/scheduler/next` actually apply their exclusion/
+  weighting logic, not just expose their status endpoints.
+- Callback hooks (`on_trip`, `on_scale_up`, `on_weight_change`, etc.)
+  aren't configurable from JSON (they're Python functions) — CLI-started
+  features rely on the same internal `logger.info()`/`logger.warning()`
+  calls those classes already make on every state change. Use the
+  Python API directly (`MasterNode(..., circuit_breaker=ClusterCircuitBreaker(on_trip=...))`)
+  if you need custom callback behavior.
+- Bad config (unknown feature name, invalid constructor argument, wrong
+  type) fails fast with a specific error message at startup, not a raw
+  traceback.
 
 ---
 

@@ -124,6 +124,90 @@ def _handle_termination_signals() -> None:
         pass   # not in the main thread, or platform doesn't support it
 
 
+
+# Advanced-feature loading (--features)
+
+
+# Maps a --features JSON top-level key to (import path, class name).
+# Kept as a lazy lookup table (rather than importing everything up
+# front) so `huddle-cluster nodes list` etc. stay fast to start.
+_FEATURE_CLASSES = {
+    "circuit_breaker":    ("huddle_cluster_pkg.cluster_circuit_breaker",  "ClusterCircuitBreaker"),
+    "rate_limiter":       ("huddle_cluster_pkg.cluster_rate_limiter",     "ClusterRateLimiter"),
+    "canary":             ("huddle_cluster_pkg.cluster_canary_deployment","ClusterCanaryDeployment"),
+    "autoscaler":         ("huddle_cluster_pkg.cluster_autoscaler",       "ClusterAutoScaler"),
+    "service_discovery":  ("huddle_cluster_pkg.cluster_service_discovery","ServiceDiscovery"),
+    "observability":      ("huddle_cluster_pkg.cluster_observability",    "ClusterObservability"),
+    "ha":                 ("huddle_cluster_pkg.cluster_ha",               "ClusterHA"),
+}
+
+# Features whose presence should auto-wire a ClusterScheduler, since
+# without one, /v1/scheduler/next won't apply their exclusion logic
+# (breakers/rate-limits/canary weighting all act through the
+# scheduler's pick() — attaching them to the master alone only gets
+# you their REST status endpoints and events, not routing).
+_SCHEDULER_FEATURES = ("circuit_breaker", "rate_limiter", "canary")
+
+
+def _load_features_config(raw: str) -> Dict[str, Any]:
+    """
+    ``raw`` is either a path to a JSON file or an inline JSON string
+    (tried as a file first, so a typo'd path doesn't silently parse as
+    JSON and fail confusingly). Returns the parsed top-level dict.
+    """
+    import os
+    text = raw
+    if os.path.isfile(raw):
+        with open(raw, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    try:
+        config = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise SystemExit(
+            f"--features: could not parse as JSON (and no such file exists "
+            f"either): {e}\n"
+            f"Expected either a path to a .json file, or an inline JSON "
+            f"string like '{{\"circuit_breaker\": {{\"trip_threshold\": 0.5}}}}'"
+        )
+    if not isinstance(config, dict):
+        raise SystemExit("--features: top-level JSON must be an object "
+                          "(e.g. {\"autoscaler\": {...}, \"canary\": {...}})")
+    unknown = set(config) - set(_FEATURE_CLASSES)
+    if unknown:
+        raise SystemExit(
+            f"--features: unknown key(s) {sorted(unknown)}. "
+            f"Valid keys: {sorted(_FEATURE_CLASSES)}"
+        )
+    return config
+
+
+def _build_features(config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Instantiate each configured feature class with its JSON block as
+    kwargs. Returns a dict of {feature_name: instance} for the ones
+    present in config. Raises SystemExit with a clear message on bad
+    kwargs, rather than a raw traceback, since this runs at CLI
+    startup where a stack trace is unhelpful noise for a config typo.
+    """
+    import importlib
+
+    built: Dict[str, Any] = {}
+    for name, kwargs in config.items():
+        if not isinstance(kwargs, dict):
+            raise SystemExit(
+                f"--features: value for {name!r} must be a JSON object "
+                f"of constructor arguments (got {type(kwargs).__name__})")
+        module_path, class_name = _FEATURE_CLASSES[name]
+        cls = getattr(importlib.import_module(module_path), class_name)
+        try:
+            built[name] = cls(**kwargs)
+        except TypeError as e:
+            raise SystemExit(f"--features: bad arguments for {name!r} ({class_name}): {e}")
+        except ValueError as e:
+            raise SystemExit(f"--features: invalid config for {name!r}: {e}")
+    return built
+
+
 def cmd_master_start(args: argparse.Namespace) -> None:
     """Start a MasterNode (blocking until Ctrl-C)."""
     import logging
@@ -146,6 +230,19 @@ def cmd_master_start(args: argparse.Namespace) -> None:
             k, role = item.split("=", 1)
             api_keys[k.strip()] = role.strip()
 
+    features: Dict[str, Any] = {}
+    if args.features:
+        features = _build_features(_load_features_config(args.features))
+
+    scheduler = None
+    if any(k in features for k in _SCHEDULER_FEATURES):
+        from huddle_cluster_pkg.cluster_scheduler import ClusterScheduler
+        scheduler = ClusterScheduler(
+            circuit_breaker=features.get("circuit_breaker"),
+            rate_limiter=features.get("rate_limiter"),
+            canary=features.get("canary"),
+        )
+
     master = MasterNode(
         host=args.host,
         port=args.port,
@@ -161,6 +258,14 @@ def cmd_master_start(args: argparse.Namespace) -> None:
         tls_require_client_cert=args.tls_require_client_cert,
         state_file=args.state_file,
         state_save_interval_sec=args.state_save_interval,
+        scheduler=scheduler,
+        circuit_breaker=features.get("circuit_breaker"),
+        rate_limiter=features.get("rate_limiter"),
+        canary=features.get("canary"),
+        autoscaler=features.get("autoscaler"),
+        service_discovery=features.get("service_discovery"),
+        observability=features.get("observability"),
+        ha=features.get("ha"),
     )
 
     def on_join(node):
@@ -195,6 +300,7 @@ def cmd_master_start(args: argparse.Namespace) -> None:
         print(f"  Purge     : dead nodes removed after {args.purge_after:.0f}s")
     print(f"  Auth      : {'enabled (' + str(len(api_keys)) + ' key(s))' if api_keys else 'disabled (open API)'}")
     print(f"  Persist   : {'enabled (' + args.state_file + ')' if args.state_file else 'disabled (in-memory registry only)'}")
+    print(f"  Features  : {', '.join(sorted(features)) if features else 'none (see --features to enable)'}")
     _scheme = "https" if args.tls_cert else "http"
     if args.tls_cert:
         _mtls = (" + mTLS required" if args.tls_require_client_cert
@@ -401,6 +507,17 @@ def build_parser() -> argparse.ArgumentParser:
     ms.add_argument("--state-save-interval", type=float, default=5.0,
                     help="Seconds between registry snapshots while running "
                          "(default: 5.0). Ignored without --state-file.")
+    ms.add_argument("--features", default=None, metavar="PATH_OR_JSON",
+                    help="Enable advanced features (circuit_breaker, rate_limiter, "
+                         "canary, autoscaler, service_discovery, observability, ha) "
+                         "via a JSON config — either a path to a .json file or an "
+                         "inline JSON string. Each top-level key names a feature; "
+                         "its value is passed as keyword arguments to that "
+                         "feature's constructor. Example: "
+                         "--features '{\"autoscaler\": {\"min_nodes\": 3, \"max_nodes\": 10}, "
+                         "\"circuit_breaker\": {\"trip_threshold\": 0.5}}'. "
+                         "See docs/CLUSTER.md \"CLI feature config\" for the full "
+                         "schema and an example file.")
     ms.set_defaults(func=cmd_master_start)
 
     # agent

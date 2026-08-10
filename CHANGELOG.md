@@ -5,6 +5,60 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.13.0] - 2026-08-06
+
+### Added — CLI wiring for advanced features (`--features`)
+
+**The gap:** every advanced feature added since Level 4 (circuit
+breaker, rate limiter, canary, autoscaler, service discovery,
+observability, HA) was Python-API-only — `huddle-cluster master start`
+had no way to enable any of them. Using them required writing a custom
+Python script to construct the feature classes and pass them into
+`MasterNode(...)` by hand, which meant the CLI tool alone wasn't
+sufficient to run a production-configured master.
+
+**`huddle-cluster master start` gained `--features PATH_OR_JSON`:**
+- Takes a path to a `.json` file or an inline JSON string
+- Each top-level key names a feature (`circuit_breaker`, `rate_limiter`,
+  `canary`, `autoscaler`, `service_discovery`, `observability`, `ha`);
+  its value is passed as keyword arguments to that feature's constructor
+- When `circuit_breaker`/`rate_limiter`/`canary` is present, a
+  `ClusterScheduler` is automatically built and wired with them, so
+  `GET /v1/scheduler/next` actually applies their logic rather than
+  just exposing status endpoints
+- Startup banner gained a `Features:` line listing what's enabled
+- Bad config (unknown feature name, invalid constructor kwarg, wrong
+  value type, missing required arg like HA's `node_id`) fails fast at
+  startup with a specific, actionable message — `SystemExit`, not a
+  raw traceback
+- Callback hooks (`on_trip`, `on_scale_up`, etc.) aren't configurable
+  from JSON since they're Python functions — CLI-started features rely
+  on those classes' existing internal `logger.info()`/`logger.warning()`
+  calls on every state change; use the Python API directly for custom
+  callback behavior
+- Fully backward compatible — omitting `--features` behaves exactly as
+  before (verified with a dedicated regression test)
+
+**Docs**
+- New "CLI feature config (`--features`)" subsection under CLI
+  reference in `docs/CLUSTER.md`, with a full example JSON file
+
+**Tests** (`tests/test_cli_features.py`, new file, 16 tests)
+- Unit tests for config loading/validation (inline JSON, file path,
+  invalid JSON, non-object top-level, unknown keys)
+- Unit tests for feature instantiation (correct classes built with
+  correct kwargs, bad kwargs rejected with a clear message, HA's
+  required `node_id` enforced)
+- Integration tests actually spawning `huddle-cluster master start
+  --features ...` as a subprocess and querying its real REST API:
+  multiple features enabled together and correctly reflected in
+  `GET /v1/status` (including the auto-wired scheduler), a bad-config
+  run exits non-zero with a clear stderr message, and a regression
+  test confirming `master start` without `--features` behaves exactly
+  as it did before this feature existed
+
+---
+
 ## [4.12.0] - 2026-08-05
 
 ### Fixed — ClusterAutoScaler.status() misreported last_decision/last_reason during cooldown

@@ -1,5 +1,13 @@
 # HuddleCluster — Interactive Demos
 
+> **Note (v4.13.0+):** if you just want to turn a feature on for a real
+> master, you no longer need any of these scripts — see
+> `--features` in `docs/CLUSTER.md`'s CLI reference
+> (`huddle-cluster master start --features features.json`). These demo
+> scripts remain useful for interactive exploration (typing `fail
+> web-2 0.9` at a prompt, watching events fire) and for custom callback
+> behavior, which isn't expressible from the CLI's JSON config.
+
 Hands-on scripts for exploring individual HuddleCluster features
 locally, one master process at a time. These were written for manual
 exploration/testing (v4.4.0–v4.12.0 development), not as reference

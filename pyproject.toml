@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "huddle-cluster"
-version = "4.12.0"
+version = "4.13.0"
 description = "A penguin-inspired self-organizing server load balancer with adaptive thermal eviction — now with master/agent cluster management"
 readme = "README.md"
 license = { file = "LICENSE" }
