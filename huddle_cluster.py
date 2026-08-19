@@ -125,7 +125,7 @@ from enum import Enum
 from typing import Any, Callable, Generator, Optional
 
 #  Version 
-__version__ = "4.13.0"
+__version__ = "4.14.0"
 __author__  = "Rahad Bhuiya"
 __license__ = "MIT"
 

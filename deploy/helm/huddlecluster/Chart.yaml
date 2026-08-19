@@ -1,0 +1,17 @@
+apiVersion: v2
+name: huddlecluster
+description: >-
+  HuddleCluster — a penguin-inspired, self-organizing load balancer with
+  adaptive thermal eviction, deployed as a master + agent DaemonSet.
+type: application
+version: 0.1.0
+appVersion: "4.13.0"
+keywords:
+  - load-balancer
+  - cluster-management
+  - distributed-systems
+home: https://github.com/rahadbhuiya/HuddleCluster
+sources:
+  - https://github.com/rahadbhuiya/HuddleCluster
+maintainers:
+  - name: Rahad Bhuiya

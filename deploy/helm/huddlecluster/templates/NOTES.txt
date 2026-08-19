@@ -1,0 +1,51 @@
+HuddleCluster has been deployed.
+
+Master service: {{ include "huddlecluster.masterServiceName" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.master.service.port }}
+
+{{- if .Values.master.ha.enabled }}
+
+HA mode: {{ .Values.master.ha.replicaCount }} master replicas
+(StatefulSet {{ include "huddlecluster.fullname" . }}-master).
+Check which one is currently leader:
+
+  kubectl exec -n {{ .Release.Namespace }} {{ include "huddlecluster.fullname" . }}-master-0 -- \
+    curl -s http://localhost:{{ .Values.master.port }}/v1/ha/status
+{{- else }}
+
+Single master (Deployment {{ include "huddlecluster.fullname" . }}-master).
+{{- end }}
+
+{{- if .Values.agent.enabled }}
+
+Agents: DaemonSet {{ include "huddlecluster.fullname" . }}-agent (one per node).
+{{- else }}
+
+Agents: disabled (agent.enabled=false) — deploy your own AgentNode
+processes pointed at the master service above.
+{{- end }}
+
+Check status:
+
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "huddlecluster.masterServiceName" . }} 7070:{{ .Values.master.service.port }}
+  curl http{{ if .Values.master.tls.enabled }}s{{ end }}://localhost:7070/v1/status
+
+{{- if not .Values.master.auth.apiKeys }}
+{{- if not .Values.master.auth.existingSecret }}
+
+WARNING: no API keys configured (master.auth.apiKeys / master.auth.existingSecret
+are both empty) — the master's REST API is running with auth disabled
+(open API). Fine for a quick trial in an isolated namespace; set
+master.auth.apiKeys before using this anywhere the API is reachable by
+untrusted traffic.
+{{- end }}
+{{- end }}
+
+{{- if not .Values.master.tls.enabled }}
+
+NOTE: TLS is disabled (master.tls.enabled=false) — the master serves
+plain HTTP. Put a TLS-terminating Ingress in front for anything beyond
+local/trusted-network use, or set master.tls.enabled=true with a cert
+Secret.
+{{- end }}
+
+Full configuration reference: docs/CLUSTER.md in the HuddleCluster repo.

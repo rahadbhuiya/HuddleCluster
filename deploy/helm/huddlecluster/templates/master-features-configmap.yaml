@@ -1,0 +1,15 @@
+{{- if .Values.master.features -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "huddlecluster.fullname" . }}-features
+  labels:
+    {{- include "huddlecluster.labels" . | nindent 4 }}
+data:
+  # Mounted at /etc/huddle/features.json and passed via --features.
+  # In HA mode, the entrypoint wrapper merges an "ha" block (with
+  # this Pod's own node_id/peers, which can't be known at Helm-render
+  # time) into a copy of this before passing it along — see master.yaml.
+  features.json: |
+    {{- toJson .Values.master.features | nindent 4 }}
+{{- end }}

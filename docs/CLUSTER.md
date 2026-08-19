@@ -1054,8 +1054,9 @@ Notes:
 ## Deployment
 
 As of v4.9.0, `deploy/` has a Dockerfile, a docker-compose demo, and
-basic Kubernetes manifests — a starting point, not a hardened deployment
-you should point at production without reading it first.
+basic Kubernetes manifests. As of v4.14.0, it also has a Helm chart. All
+of this is a starting point, not a hardened deployment you should point
+at production without reading it first.
 
 **Docker:**
 
@@ -1072,7 +1073,7 @@ cd deploy/docker && docker compose up --build
 curl http://localhost:7070/v1/nodes
 ```
 
-**Kubernetes:**
+**Kubernetes (plain manifests):**
 
 ```bash
 kubectl apply -f deploy/k8s/
@@ -1084,24 +1085,62 @@ PersistentVolumeClaim for `--state-file`, and a Secret for the API key.
 `deploy/k8s/agent-daemonset.yaml` — one agent per node via DaemonSet,
 using `spec.nodeName` as the agent ID.
 
-**Graceful shutdown matters here:** `docker stop` and Kubernetes pod
-termination send `SIGTERM`, not `SIGINT` (Ctrl-C) — the CLI now
-(v4.9.0) translates `SIGTERM` into the same graceful-stop path, so
-`--state-file` gets a final flush before the process exits.
-`terminationGracePeriodSeconds` in the Deployment/DaemonSet gives that
-shutdown time to complete rather than being hard-killed.
+**Kubernetes (Helm, v4.14.0+):**
+
+```bash
+helm install my-huddlecluster deploy/helm/huddlecluster \
+  --set image.repository=your-registry/huddlecluster \
+  --set image.tag=4.13.0
+```
+
+Covers everything the plain manifests do, plus:
+
+- **HA mode** — `--set master.ha.enabled=true` (and
+  `master.ha.replicaCount`, default 3) deploys the master as a
+  StatefulSet instead of a single-replica Deployment, with each Pod
+  computing its own `node_id`/`peers` at container startup from
+  `$HOSTNAME` and a headless Service, so `ClusterHA` peer discovery
+  works without any manual per-replica configuration
+- **Every `--features` (v4.13.0) feature** configurable straight from
+  `values.yaml`'s `master.features` block (circuit breaker, rate
+  limiter, canary, autoscaler, service discovery, observability) —
+  same schema as the CLI `--features` JSON described above
+- API keys mounted from a Secret and read by a wrapper entrypoint
+  script rather than baked into Pod args, so they don't show up in
+  `kubectl describe pod`/`kubectl get pod -o yaml`
+- TLS via `master.tls.existingSecret` (the chart deliberately does
+  **not** auto-generate a self-signed cert — bring your own via
+  `kubectl create secret tls` or cert-manager; the chart's template
+  validation fails fast with a clear message if you enable TLS without
+  pointing at a secret)
+
+See `deploy/helm/huddlecluster/README.md` and `values.yaml` (fully
+commented) for the complete option reference. That README also has an
+important verification note: `helm lint` and `helm template` were run
+against this chart and it renders cleanly (including the HA+TLS
+combined path, and the TLS-without-a-secret validation guard firing
+correctly), but it has **not** been deployed against a live cluster
+with `kubectl apply` yet — do that yourself before trusting it with
+anything real, same spirit as everything else in this section.
+
+**Graceful shutdown matters for all three of the above:** `docker stop`
+and Kubernetes pod termination send `SIGTERM`, not `SIGINT` (Ctrl-C) —
+the CLI (v4.9.0+) translates `SIGTERM` into the same graceful-stop
+path, so `--state-file` gets a final flush before the process exits.
+`terminationGracePeriodSeconds` in the Deployment/StatefulSet/DaemonSet
+gives that shutdown time to complete rather than being hard-killed.
 
 **What this deployment setup does *not* give you** — same honesty as
 elsewhere in this doc:
-- No Helm chart (plain manifests only) — no templating for
-  multi-environment values, no chart versioning
-- No image published to a registry — `image: huddlecluster:latest`
-  assumes you build and push it yourself
-- No HA wiring in the manifests — `master.yaml` deploys one replica;
-  see [High-Availability Master](#high-availability-master) to run 3
-  and wire `ClusterHA(peers=...)` across them yourself
-- No network policies, pod security context, or ingress/TLS-at-the-edge
-  configuration — bring your own per your cluster's standards
+- No image published to a registry — `image.repository`/`image.tag`
+  (or `image: huddlecluster:latest` in the plain manifests) assumes you
+  build and push it yourself
+- The Helm chart hasn't been run against a live cluster with `kubectl
+  apply` yet (see above) — `helm lint`/`helm template` pass, real
+  deployment is the next step, on you
+- No network policies, pod security context beyond the chart's
+  defaults, or ingress/TLS-at-the-edge configuration — bring your own
+  per your cluster's standards
 - Not load-tested at Kubernetes scale (hundreds of agent Pods against
   one master) — the [WAN / high-latency benchmark](#running-benchmarks)
   below is Docker-bridge/local only, not a K8s-scale validation
@@ -1218,3 +1257,16 @@ Auto recovery · Prometheus metrics · RBAC/auth · Web dashboard · REST API ex
 - [x] Rate limiter — per-node token bucket, burst protection, scheduler exclusion — v4.1.0
 - [x] Canary deployment — weight-based traffic splitting, start/advance/promote/abort — v4.2.0
 - [x] Observability — structured JSON logging, distributed trace IDs — v4.3.0
+
+**Level 5 — Production Hardening (complete, with honestly-noted partial items)**
+- [x] TLS/HTTPS + mTLS, threaded HTTP server — v4.4.0
+- [x] State persistence — HA term/vote + node registry survive restarts — v4.5.0
+- [x] mTLS node identity — client cert CN recorded on join — v4.6.0
+- [x] HA failover staleness fix + documented Raft limitations — v4.7.0 (partial — still a simplified, non-log-based Raft, see [Honest limitations](#honest-limitations))
+- [x] OTLP log export (Jaeger/Tempo/OTel Collector compatible) — v4.8.0
+- [x] Docker + Kubernetes deployment manifests, SIGTERM graceful shutdown fix — v4.9.0
+- [x] WAN-latency simulation benchmark — v4.10.0 (partial — simulated on one host, not real multi-region, see [WAN / high-latency benchmark](#wan--high-latency-benchmark))
+- [x] Agent-side TLS trust configuration (`tls_verify`/`tls_ca_certs`/mTLS client certs) — v4.11.0
+- [x] Autoscaler status-reporting fix (`last_decision`/`last_reason` during cooldown) — v4.12.0
+- [x] CLI `--features` — circuit breaker/rate limiter/canary/autoscaler/service discovery/observability/HA all configurable without writing Python — v4.13.0
+- [x] Helm chart — v4.14.0 (`helm lint`/`helm template` verified; not yet deployed against a live cluster, see [Deployment](#deployment))

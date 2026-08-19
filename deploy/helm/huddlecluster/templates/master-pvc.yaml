@@ -1,0 +1,16 @@
+{{- if and .Values.master.persistence.enabled (not .Values.master.ha.enabled) -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "huddlecluster.fullname" . }}-master-state
+  labels:
+    {{- include "huddlecluster.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.master.persistence.storageClassName }}
+  storageClassName: {{ .Values.master.persistence.storageClassName }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.master.persistence.size }}
+{{- end }}

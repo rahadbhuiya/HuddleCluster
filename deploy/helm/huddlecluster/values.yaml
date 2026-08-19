@@ -1,0 +1,158 @@
+# Default values for huddlecluster.
+# This is a YAML-formatted file — override any of these with
+# `helm install -f my-values.yaml` or `--set key=value`.
+
+image:
+  repository: huddlecluster
+  tag: "4.13.0"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+#  Master 
+master:
+  # Always 1 — this chart does not scale the master to multiple
+  # replicas by itself. For real HA (multiple masters electing a
+  # leader), see `master.ha` below, which runs a StatefulSet of N
+  # independent master Pods wired to each other via ClusterHA, NOT
+  # N replicas of one Deployment (those are different things — a
+  # naive `replicaCount > 1` Deployment would just give you N
+  # *uncoordinated* masters, not a coordinated HA cluster).
+  port: 7070
+
+  service:
+    type: ClusterIP
+    port: 7070
+
+  # Node registry / HA term-vote persistence. Requires a
+  # PersistentVolumeClaim per master Pod.
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClassName: ""   # "" = cluster default
+    stateSaveIntervalSec: 5.0
+
+  # TLS termination at the master itself (see docs/CLUSTER.md "TLS /
+  # HTTPS"). Provide your own cert/key via an existing Secret, or set
+  # enabled: false to serve plain HTTP (put a TLS-terminating ingress
+  # in front instead, in that case).
+  tls:
+    enabled: false
+    existingSecret: ""       # Secret with tls.crt / tls.key keys
+    requireClientCert: false
+    caCertSecretKey: ""      # key within existingSecret holding the CA/cert for mTLS
+
+  # RBAC API keys. Either list them here (they'll go into a generated
+  # Secret) or point at an existingSecret with the same key=role
+  # format the CLI's --api-key expects, one per line, as a single
+  # string value under `data.apiKeys`.
+  auth:
+    apiKeys: []
+    # apiKeys:
+    #   - key: "change-me"
+    #     role: admin
+    existingSecret: ""
+
+  # Advanced features (circuit breaker, rate limiter, canary,
+  # autoscaler, service discovery, observability, HA) — passed
+  # straight through to `--features` (see docs/CLUSTER.md "CLI feature
+  # config"). Leave empty ({}) to disable all of them.
+  features: {}
+  # features:
+  #   circuit_breaker: { trip_threshold: 0.5, reset_timeout_sec: 60 }
+  #   autoscaler: { min_nodes: 3, max_nodes: 10 }
+  #   observability: { service_name: "prod-master", otlp_endpoint: "http://otel-collector:4318" }
+
+  # High availability: N independent master Pods (StatefulSet), each
+  # running ClusterHA wired to the others via this Service's stable
+  # DNS names. Disabled by default (single master, per replicaCount
+  # note above). When enabled, `master.features.ha` (if also set) is
+  # ignored — the chart builds the ha block itself per-replica, since
+  # node_id/peers must differ per Pod.
+  ha:
+    enabled: false
+    replicaCount: 3
+    electionTimeoutSec: 2.0
+    heartbeatIntervalSec: 0.5
+    syncIntervalSec: 2.0
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  podAnnotations: {}
+  extraEnv: []
+
+  livenessProbe:
+    httpGet:
+      path: /v1/health
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  readinessProbe:
+    httpGet:
+      path: /v1/health
+      port: http
+    initialDelaySeconds: 2
+    periodSeconds: 5
+
+#  Agent (DaemonSet — one per node) 
+agent:
+  enabled: true
+  port: 8080
+
+  # If master.auth.apiKeys/existingSecret is set, agents authenticate
+  # using this key (must match one of the master's configured keys).
+  apiKey: ""
+
+  # Mirrors master.tls — agents connecting to an HTTPS master need to
+  # know how to trust its certificate.
+  tls:
+    caCertSecretKey: ""   # verify master's cert against this
+    noVerify: false        # dev/testing only
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+  nodeSelector: {}
+  tolerations:
+    # DaemonSets commonly need to run on control-plane/tainted nodes
+    # too, if you want an agent representing every node in the
+    # cluster. Remove if that's not what you want.
+    - key: node-role.kubernetes.io/control-plane
+      effect: NoSchedule
+      operator: Exists
+  affinity: {}
+
+  podAnnotations: {}
+  extraEnv: []
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop: ["ALL"]

@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "huddlecluster.masterServiceName" . }}
+  labels:
+    {{- include "huddlecluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: master
+spec:
+  type: {{ .Values.master.service.type }}
+  ports:
+    - port: {{ .Values.master.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "huddlecluster.masterSelectorLabels" . | nindent 4 }}
+
+{{- if .Values.master.ha.enabled }}
+---
+# Headless Service — gives each master StatefulSet Pod a stable,
+# individually-addressable DNS name
+# (<pod>.<this-service>.<namespace>.svc.cluster.local), which is how
+# HA peers find each other. Not meant to be used for client traffic —
+# use the Service above for that.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "huddlecluster.masterServiceName" . }}-headless
+  labels:
+    {{- include "huddlecluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: master
+spec:
+  clusterIP: None
+  ports:
+    - port: {{ .Values.master.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "huddlecluster.masterSelectorLabels" . | nindent 4 }}
+{{- end }}

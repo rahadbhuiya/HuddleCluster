@@ -1,0 +1,204 @@
+{{- $fullname := include "huddlecluster.fullname" . -}}
+{{- $masterSvc := include "huddlecluster.masterServiceName" . -}}
+apiVersion: apps/v1
+kind: {{ if .Values.master.ha.enabled }}StatefulSet{{ else }}Deployment{{ end }}
+metadata:
+  name: {{ $fullname }}-master
+  labels:
+    {{- include "huddlecluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: master
+{{- if and .Values.master.tls.enabled (not .Values.master.tls.existingSecret) }}
+{{- fail "master.tls.enabled=true requires master.tls.existingSecret to be set — this chart does not generate a self-signed certificate for you (deliberately: see the chart README). Create one first, e.g.:\n  kubectl create secret tls my-huddlecluster-tls --cert=server.crt --key=server.key\nthen set master.tls.existingSecret=my-huddlecluster-tls" }}
+{{- end }}
+spec:
+{{- if .Values.master.ha.enabled }}
+  serviceName: {{ $masterSvc }}-headless
+  replicas: {{ .Values.master.ha.replicaCount }}
+  podManagementPolicy: Parallel
+{{- else }}
+  replicas: 1
+  strategy:
+    # A single master with a PVC for state_file — two replicas writing
+    # the same volume concurrently would corrupt the snapshot. Recreate
+    # accepts a short gap in availability on rollout rather than risk that.
+    type: Recreate
+{{- end }}
+  selector:
+    matchLabels:
+      {{- include "huddlecluster.masterSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "huddlecluster.masterSelectorLabels" . | nindent 8 }}
+      {{- with .Values.master.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "huddlecluster.serviceAccountName" . }}
+      # SIGTERM triggers HuddleCluster's graceful shutdown (state_file
+      # final snapshot, HA step-down) — give it real time to complete
+      # rather than being hard-killed mid-write.
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: master
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              EXTRA_ARGS=""
+
+              {{- if .Values.master.persistence.enabled }}
+              EXTRA_ARGS="$EXTRA_ARGS --state-file /var/lib/huddle/registry.json --state-save-interval {{ .Values.master.persistence.stateSaveIntervalSec }}"
+              {{- end }}
+
+              {{- if .Values.master.tls.enabled }}
+              EXTRA_ARGS="$EXTRA_ARGS --tls-cert /etc/huddle/tls/tls.crt --tls-key /etc/huddle/tls/tls.key"
+              {{- if .Values.master.tls.caCertSecretKey }}
+              EXTRA_ARGS="$EXTRA_ARGS --tls-ca /etc/huddle/tls/{{ .Values.master.tls.caCertSecretKey }}"
+              {{- end }}
+              {{- if .Values.master.tls.requireClientCert }}
+              EXTRA_ARGS="$EXTRA_ARGS --tls-require-client-cert"
+              {{- end }}
+              {{- end }}
+
+              # API keys, if configured — read from the mounted Secret
+              # rather than baked into args, so they don't show up in
+              # `kubectl describe pod`/`kubectl get pod -o yaml`.
+              if [ -f /etc/huddle/secrets/api-keys.json ]; then
+                API_KEY_ARGS=$(python3 -c "
+              import json
+              with open('/etc/huddle/secrets/api-keys.json') as f:
+                  keys = json.load(f)
+              print(' '.join('--api-key ' + k['key'] + '=' + k['role'] for k in keys))
+              ")
+                EXTRA_ARGS="$EXTRA_ARGS $API_KEY_ARGS"
+              fi
+
+              {{- if .Values.master.ha.enabled }}
+              # HA mode: this Pod's own node_id/peers can't be known at
+              # Helm-render time (StatefulSet Pods all share one
+              # template) — build them here from $HOSTNAME, which
+              # StatefulSet sets to "<name>-<ordinal>".
+              python3 -c "
+              import json, os, socket
+              hostname = socket.gethostname()
+              base = json.load(open('/etc/huddle/features.json')) if os.path.exists('/etc/huddle/features.json') else {}
+              peers = []
+              for i in range({{ .Values.master.ha.replicaCount }}):
+                  peer_name = '{{ $fullname }}-master-' + str(i)
+                  if peer_name != hostname:
+                      peers.append('http://' + peer_name + '.{{ $masterSvc }}-headless.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.master.port }}')
+              base['ha'] = {
+                  'node_id': hostname,
+                  'peers': peers,
+                  'election_timeout_sec': {{ .Values.master.ha.electionTimeoutSec }},
+                  'heartbeat_interval_sec': {{ .Values.master.ha.heartbeatIntervalSec }},
+                  'sync_interval_sec': {{ .Values.master.ha.syncIntervalSec }},
+                  {{- if .Values.master.persistence.enabled }}
+                  'state_file': '/var/lib/huddle/ha_state.json',
+                  {{- end }}
+              }
+              json.dump(base, open('/tmp/features-merged.json', 'w'))
+              "
+              EXTRA_ARGS="$EXTRA_ARGS --features /tmp/features-merged.json"
+              {{- else if .Values.master.features }}
+              EXTRA_ARGS="$EXTRA_ARGS --features /etc/huddle/features.json"
+              {{- end }}
+
+              exec huddle-cluster master start --host 0.0.0.0 --port {{ .Values.master.port }} $EXTRA_ARGS
+          ports:
+            - name: http
+              containerPort: {{ .Values.master.port }}
+              protocol: TCP
+          {{- with .Values.master.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.master.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.master.resources | nindent 12 }}
+          {{- with .Values.master.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            {{- if .Values.master.persistence.enabled }}
+            - name: state
+              mountPath: /var/lib/huddle
+            {{- end }}
+            {{- if .Values.master.tls.enabled }}
+            - name: tls
+              mountPath: /etc/huddle/tls
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.master.auth.apiKeys (not .Values.master.auth.existingSecret) }}
+            - name: auth
+              mountPath: /etc/huddle/secrets
+              readOnly: true
+            {{- else if .Values.master.auth.existingSecret }}
+            - name: auth
+              mountPath: /etc/huddle/secrets
+              readOnly: true
+            {{- end }}
+            {{- if .Values.master.features }}
+            - name: features
+              mountPath: /etc/huddle/features.json
+              subPath: features.json
+              readOnly: true
+            {{- end }}
+      volumes:
+        {{- if and .Values.master.persistence.enabled (not .Values.master.ha.enabled) }}
+        - name: state
+          persistentVolumeClaim:
+            claimName: {{ $fullname }}-master-state
+        {{- end }}
+        {{- if .Values.master.tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ include "huddlecluster.tlsSecretName" . }}
+        {{- end }}
+        {{- if or .Values.master.auth.apiKeys .Values.master.auth.existingSecret }}
+        - name: auth
+          secret:
+            secretName: {{ include "huddlecluster.authSecretName" . }}
+        {{- end }}
+        {{- if .Values.master.features }}
+        - name: features
+          configMap:
+            name: {{ $fullname }}-features
+        {{- end }}
+      {{- with .Values.master.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.master.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.master.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if and .Values.master.persistence.enabled .Values.master.ha.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: state
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.master.persistence.storageClassName }}
+        storageClassName: {{ .Values.master.persistence.storageClassName }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.master.persistence.size }}
+{{- end }}

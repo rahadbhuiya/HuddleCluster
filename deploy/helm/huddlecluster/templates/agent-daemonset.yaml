@@ -1,0 +1,93 @@
+{{- if .Values.agent.enabled -}}
+{{- $fullname := include "huddlecluster.fullname" . -}}
+{{- $masterSvc := include "huddlecluster.masterServiceName" . -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ $fullname }}-agent
+  labels:
+    {{- include "huddlecluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+spec:
+  selector:
+    matchLabels:
+      {{- include "huddlecluster.agentSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "huddlecluster.agentSelectorLabels" . | nindent 8 }}
+      {{- with .Values.agent.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "huddlecluster.serviceAccountName" . }}
+      terminationGracePeriodSeconds: 15
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              EXTRA_ARGS=""
+              {{- if .Values.agent.apiKey }}
+              EXTRA_ARGS="$EXTRA_ARGS --api-key {{ .Values.agent.apiKey }}"
+              {{- end }}
+              {{- if .Values.master.tls.enabled }}
+                {{- if .Values.agent.tls.noVerify }}
+              EXTRA_ARGS="$EXTRA_ARGS --tls-no-verify"
+                {{- else if .Values.agent.tls.caCertSecretKey }}
+              EXTRA_ARGS="$EXTRA_ARGS --tls-ca /etc/huddle/tls/{{ .Values.agent.tls.caCertSecretKey }}"
+                {{- end }}
+              {{- end }}
+              MASTER_URL="http{{ if .Values.master.tls.enabled }}s{{ end }}://{{ $masterSvc }}:{{ .Values.master.service.port }}"
+              exec huddle-cluster agent start \
+                --id "$NODE_NAME" \
+                --master "$MASTER_URL" \
+                --port {{ .Values.agent.port }} \
+                $EXTRA_ARGS
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          {{- with .Values.agent.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.agent.port }}
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.agent.resources | nindent 12 }}
+          {{- if and .Values.master.tls.enabled .Values.agent.tls.caCertSecretKey }}
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/huddle/tls
+              readOnly: true
+          {{- end }}
+      {{- if and .Values.master.tls.enabled .Values.agent.tls.caCertSecretKey }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ include "huddlecluster.tlsSecretName" . }}
+      {{- end }}
+      {{- with .Values.agent.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agent.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agent.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

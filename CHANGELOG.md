@@ -5,6 +5,56 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+
+## [4.14.0] - 2026-08-06
+
+### Added — Helm chart (`deploy/helm/huddlecluster/`)
+
+**Chart contents**
+- `Chart.yaml`, `values.yaml` (fully commented), `templates/` (master
+  Deployment/StatefulSet, agent DaemonSet, Services, Secrets, PVC,
+  ConfigMap, ServiceAccount, NOTES.txt)
+- Master runs as a Deployment by default, or a StatefulSet when
+  `master.ha.enabled=true` — each replica computes its own
+  `node_id`/`peers` at container startup from `$HOSTNAME` and the
+  headless Service's per-Pod DNS names (standard Kubernetes pattern
+  for this kind of peer discovery)
+- `values.yaml`'s `master.features` block maps directly onto the
+  v4.13.0 CLI `--features` config — circuit breaker, rate limiter,
+  canary, autoscaler, service discovery, observability all
+  configurable from Helm values
+- TLS (existing Secret or your own), state persistence (PVC / per-Pod
+  volumeClaimTemplates in HA mode), and API keys (Secret-mounted, read
+  by a wrapper entrypoint script — never baked into Pod args, so they
+  don't show up in `kubectl describe pod`/`kubectl get pod -o yaml`)
+- Agent DaemonSet points at the master Service, mirrors the master's
+  TLS trust configuration
+
+**Important caveat — read before real use:** `helm` wasn't available
+in the sandbox this chart was developed in (network-restricted;
+binary downloads from `get.helm.sh` and GitHub releases were blocked),
+so it was **not** validated with `helm lint`/`helm template` against a
+real Helm installation. Verification that *was* done: brace-balance
+checking every template, manually rendering the default-values path
+and confirming valid YAML, extracting the embedded shell wrapper
+scripts and syntax-checking with `sh -n`, extracting the embedded
+Python snippets and syntax-checking with `ast.parse`. One real bug was
+caught and fixed this way (the agent DaemonSet wrapper used
+Kubernetes' `$(VAR)` env-substitution syntax inside a `sh -c` string,
+where it's interpreted as shell command substitution instead — fixed
+to plain `$VAR`). Despite that scrutiny, **run `helm lint
+deploy/helm/huddlecluster` yourself before deploying this anywhere
+real** — see `deploy/helm/huddlecluster/README.md`.
+
+**Docs**
+- `docs/CLUSTER.md` Deployment section: Helm install example, and the
+  "what this doesn't give you" list updated to reflect the chart now
+  existing (with the verification caveat above still noted)
+
+---
+
+
+
 ## [4.13.0] - 2026-08-06
 
 ### Added — CLI wiring for advanced features (`--features`)
