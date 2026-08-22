@@ -1054,9 +1054,7 @@ Notes:
 ## Deployment
 
 As of v4.9.0, `deploy/` has a Dockerfile, a docker-compose demo, and
-basic Kubernetes manifests. As of v4.14.0, it also has a Helm chart. All
-of this is a starting point, not a hardened deployment you should point
-at production without reading it first.
+basic Kubernetes manifests. As of v4.14.0, it also has a Helm chart.
 
 **Docker:**
 
@@ -1085,13 +1083,36 @@ PersistentVolumeClaim for `--state-file`, and a Secret for the API key.
 `deploy/k8s/agent-daemonset.yaml` — one agent per node via DaemonSet,
 using `spec.nodeName` as the agent ID.
 
-**Kubernetes (Helm, v4.14.0+):**
+**Kubernetes (Helm, v4.14.0+) — deployed and verified against a real
+cluster:**
 
 ```bash
 helm install my-huddlecluster deploy/helm/huddlecluster \
   --set image.repository=your-registry/huddlecluster \
   --set image.tag=4.13.0
 ```
+
+This chart has been installed against a real Kubernetes cluster
+(Docker Desktop's built-in Kubernetes, single-node) with `helm install`
+— not just `helm template`/`helm lint`. Both the master Deployment and
+agent DaemonSet Pods reached `Running`/`Ready`, the readiness probe
+against `/v1/health` passed, the PVC bound, and the agent joined the
+master over real cluster networking and was heartbeating (confirmed
+via `kubectl port-forward` + `GET /v1/nodes` showing `status: alive`
+with an incrementing `heartbeat_count`). That end-to-end path — build
+image, `helm install`, master+agent Pods come up, agent joins and
+heartbeats — is the part of this chart with the strongest evidence
+behind it.
+
+**Not yet verified against a real cluster** (renders correctly via
+`helm template`, and the underlying features are each independently
+tested outside Kubernetes, but the specific combination with
+StatefulSet/Secret-mount mechanics hasn't been exercised): HA mode
+(`master.ha.enabled=true`), TLS (`master.tls.enabled=true`), and the
+`--features`/`master.features` wiring running inside a Pod. See
+`deploy/helm/huddlecluster/README.md`'s "Verification status" section
+for the current, up-to-date picture — check there before relying on
+those specific paths in production.
 
 Covers everything the plain manifests do, plus:
 
@@ -1115,13 +1136,14 @@ Covers everything the plain manifests do, plus:
   pointing at a secret)
 
 See `deploy/helm/huddlecluster/README.md` and `values.yaml` (fully
-commented) for the complete option reference. That README also has an
-important verification note: `helm lint` and `helm template` were run
-against this chart and it renders cleanly (including the HA+TLS
-combined path, and the TLS-without-a-secret validation guard firing
-correctly), but it has **not** been deployed against a live cluster
-with `kubectl apply` yet — do that yourself before trusting it with
-anything real, same spirit as everything else in this section.
+commented) for the complete option reference, including a
+copy-pasteable local-trial recipe against Docker Desktop Kubernetes
+(the exact path that was verified) and a note about
+`image.pullPolicy`: `Never` looked like the "correct" setting for a
+purely local image but was observed failing (`ErrImageNeverPull`)
+against Docker Desktop's containerd-backed Kubernetes even with the
+image genuinely present locally — `IfNotPresent` is what actually
+worked.
 
 **Graceful shutdown matters for all three of the above:** `docker stop`
 and Kubernetes pod termination send `SIGTERM`, not `SIGINT` (Ctrl-C) —
@@ -1135,9 +1157,9 @@ elsewhere in this doc:
 - No image published to a registry — `image.repository`/`image.tag`
   (or `image: huddlecluster:latest` in the plain manifests) assumes you
   build and push it yourself
-- The Helm chart hasn't been run against a live cluster with `kubectl
-  apply` yet (see above) — `helm lint`/`helm template` pass, real
-  deployment is the next step, on you
+- HA mode, TLS, and `--features` haven't specifically been verified
+  running inside a real cluster yet (see above) — only the base
+  single-master + agent DaemonSet path has
 - No network policies, pod security context beyond the chart's
   defaults, or ingress/TLS-at-the-edge configuration — bring your own
   per your cluster's standards
@@ -1269,4 +1291,4 @@ Auto recovery · Prometheus metrics · RBAC/auth · Web dashboard · REST API ex
 - [x] Agent-side TLS trust configuration (`tls_verify`/`tls_ca_certs`/mTLS client certs) — v4.11.0
 - [x] Autoscaler status-reporting fix (`last_decision`/`last_reason` during cooldown) — v4.12.0
 - [x] CLI `--features` — circuit breaker/rate limiter/canary/autoscaler/service discovery/observability/HA all configurable without writing Python — v4.13.0
-- [x] Helm chart — v4.14.0 (`helm lint`/`helm template` verified; not yet deployed against a live cluster, see [Deployment](#deployment))
+- [x] Helm chart — v4.14.0. Base path (single master + agent DaemonSet) deployed and verified against a real Kubernetes cluster; HA/TLS/`--features` modes render correctly but haven't specifically been verified running inside a cluster yet — see [Deployment](#deployment)
