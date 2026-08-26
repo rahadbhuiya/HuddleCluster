@@ -53,8 +53,97 @@ _API_V1 = "/v1"
 _API_VERSION = "1.0.0"          # REST API contract version, reported in /v1/status
 _VALID_NODE_STATUSES = {"alive", "dead", "quarantined", "leaving"}
 
+# RBAC — as of v4.15.0, permissions are fine-grained "resource:action"
+# scopes (e.g. "canary:control", "nodes:read") rather than only the
+# two binary roles this started with. "admin" and "viewer" are kept
+# as built-in role names that expand to a bundle of scopes, so any
+# existing `api_keys={"key": "admin"}` config keeps working exactly
+# as before — this is purely additive.
+
+_ALL_PERMISSIONS: frozenset = frozenset({
+    "status:read", "metrics:read",
+    "nodes:read", "nodes:write",
+    "scheduler:read", "scheduler:write",
+    "autoscaler:read",
+    "rollout:read", "rollout:control",
+    "discovery:read", "discovery:write",
+    "regions:read", "regions:write",
+    "breakers:read", "breakers:reset",
+    "ratelimits:read", "ratelimits:reset",
+    "canary:read", "canary:control",
+    "observability:read",
+})
+
+_READ_PERMISSIONS: frozenset = frozenset(
+    p for p in _ALL_PERMISSIONS if p.endswith(":read")
+)
+
+# Built-in role names → the scope bundle they expand to. "admin" gets
+# everything (equivalent to the old hard-coded admin check); "viewer"
+# gets every read-only scope (equivalent to the old viewer check).
+_BUILTIN_ROLES: Dict[str, frozenset] = {
+    "admin":  _ALL_PERMISSIONS,
+    "viewer": _READ_PERMISSIONS,
+}
+
+
+def _resolve_api_key_permissions(
+    api_keys: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, frozenset]]:
+    """
+    Validate and resolve the api_keys config into {key: frozenset(scopes)},
+    computed once at construction time rather than per-request. Each
+    value in api_keys may be:
+      - a built-in role name string: "admin" or "viewer" (unchanged
+        from pre-v4.15.0 behavior)
+      - an iterable of specific permission scope strings, for
+        fine-grained access, e.g. ["nodes:read", "canary:control"]
+
+    Raises ValueError immediately (fail fast, same philosophy as the
+    v4.13.0 --features validation) if a role name or scope string
+    isn't recognized — a typo'd permission should never silently grant
+    less (or more) access than intended.
+    """
+    if api_keys is None:
+        return None
+    resolved: Dict[str, frozenset] = {}
+    for key, grant in api_keys.items():
+        if isinstance(grant, str):
+            perms = _BUILTIN_ROLES.get(grant)
+            if perms is None:
+                raise ValueError(
+                    f"api_keys: unknown role {grant!r} for key ending in "
+                    f"...{key[-4:] if len(key) >= 4 else key!r}. "
+                    f"Valid built-in roles: {sorted(_BUILTIN_ROLES)}. "
+                    f"For fine-grained access, pass a list of permission "
+                    f"scopes instead, e.g. [\"nodes:read\", \"canary:control\"]. "
+                    f"Valid scopes: {sorted(_ALL_PERMISSIONS)}"
+                )
+            resolved[key] = perms
+        else:
+            try:
+                scopes = frozenset(grant)
+            except TypeError:
+                raise ValueError(
+                    f"api_keys: value for a key must be a role name string "
+                    f"(\"admin\"/\"viewer\") or an iterable of permission "
+                    f"scope strings, got {type(grant).__name__}"
+                )
+            unknown = scopes - _ALL_PERMISSIONS
+            if unknown:
+                raise ValueError(
+                    f"api_keys: unknown permission scope(s) {sorted(unknown)} "
+                    f"for key ending in ...{key[-4:] if len(key) >= 4 else key!r}. "
+                    f"Valid scopes: {sorted(_ALL_PERMISSIONS)}"
+                )
+            resolved[key] = scopes
+    return resolved
+
+
 # RBAC: higher rank can do everything a lower rank can. Unrecognized role
 # strings rank 0 (no access) so a typo'd role fails closed, not open.
+# Retained for any external code that imported this directly pre-v4.15.0;
+# _check_auth() itself now uses the scope-based model above.
 _ROLE_RANK: Dict[str, int] = {"viewer": 1, "admin": 2}
 
 
@@ -221,15 +310,7 @@ class MasterNode:
         self._cluster_unhealthy = False
 
         self._api_keys = api_keys
-        if api_keys:
-            for key, role in api_keys.items():
-                if role not in _ROLE_RANK:
-                    logger.warning(
-                        "API key ending in '...%s' has unrecognized role "
-                        "'%s' (expected 'admin' or 'viewer') — it will be "
-                        "treated as having no access",
-                        key[-4:] if len(key) >= 4 else key, role,
-                    )
+        self._api_key_permissions = _resolve_api_key_permissions(api_keys)
 
         if bool(tls_certfile) != bool(tls_keyfile):
             raise ValueError(
@@ -1342,13 +1423,21 @@ setInterval(refresh, 3000);
                 except (json.JSONDecodeError, ValueError):
                     return None
 
-            def _check_auth(self, required_role: str) -> bool:
+            def _check_auth(self, required_permission: str) -> bool:
                 """
                 Returns True if the request is authorized to proceed.
                 If not, sends the 401/403 response itself and returns False.
                 When master._api_keys is None, auth is disabled entirely
                 and this always returns True (open API, same as before
                 RBAC existed).
+
+                required_permission is a scope string like "nodes:read"
+                or "canary:control" (see _ALL_PERMISSIONS) — as of
+                v4.15.0, no longer just "viewer"/"admin". Keys granted
+                the "admin"/"viewer" role string still work exactly as
+                before (those roles expand to a scope bundle at
+                construction time); keys granted a specific list of
+                scopes are checked against that list directly.
                 """
                 if master._api_keys is None:
                     return True
@@ -1361,21 +1450,21 @@ setInterval(refresh, 3000);
                     })
                     return False
 
-                key  = header[len("Bearer "):].strip()
-                role = master._api_keys.get(key)
-                if role is None:
+                key   = header[len("Bearer "):].strip()
+                scopes = master._api_key_permissions.get(key)
+                if scopes is None:
                     logger.warning("Rejected request: invalid API key")
                     self._send_json(401, {"ok": False, "error": "invalid API key"})
                     return False
 
-                if not _role_satisfies(role, required_role):
+                if required_permission not in scopes:
                     logger.warning(
-                        "Rejected request: role '%s' lacks '%s' permission",
-                        role, required_role,
+                        "Rejected request: key lacks '%s' permission",
+                        required_permission,
                     )
                     self._send_json(403, {
                         "ok": False,
-                        "error": f"role '{role}' lacks required '{required_role}' permission"
+                        "error": f"this API key lacks required '{required_permission}' permission"
                     })
                     return False
 
@@ -1436,12 +1525,12 @@ setInterval(refresh, 3000);
                                      "text/html; charset=utf-8")   # never requires auth
 
                 elif path == f"{_API_V1}/status":
-                    if not self._check_auth("viewer"):
+                    if not self._check_auth("status:read"):
                         return
                     self._send_json(200, master.status())
 
                 elif path == f"{_API_V1}/scheduler/next":
-                    if not self._check_auth("viewer"):
+                    if not self._check_auth("scheduler:read"):
                         return
                     if master._scheduler is None:
                         self._send_json(503, {
@@ -1463,7 +1552,7 @@ setInterval(refresh, 3000);
                         self._send_json(200, {"ok": True, "node": node})
 
                 elif path == f"{_API_V1}/scheduler/stats":
-                    if not self._check_auth("viewer"):
+                    if not self._check_auth("scheduler:read"):
                         return
                     if master._scheduler is None:
                         self._send_json(503, {
@@ -1474,7 +1563,7 @@ setInterval(refresh, 3000);
                     self._send_json(200, master._scheduler.scheduler_stats())
 
                 elif path == f"{_API_V1}/autoscaler/status":
-                    if not self._check_auth("viewer"):
+                    if not self._check_auth("autoscaler:read"):
                         return
                     if master._autoscaler is None:
                         self._send_json(503, {
@@ -1485,7 +1574,7 @@ setInterval(refresh, 3000);
                     self._send_json(200, master._autoscaler.status())
 
                 elif path == f"{_API_V1}/rollout/status":
-                    if not self._check_auth("viewer"):
+                    if not self._check_auth("rollout:read"):
                         return
                     if master._rolling_updater is None:
                         self._send_json(503, {
@@ -1496,7 +1585,7 @@ setInterval(refresh, 3000);
                     self._send_json(200, master._rolling_updater.status())
 
                 elif path == f"{_API_V1}/discovery/services":
-                    if not self._check_auth("viewer"):
+                    if not self._check_auth("discovery:read"):
                         return
                     if master._service_discovery is None:
                         self._send_json(503, {
@@ -1507,7 +1596,7 @@ setInterval(refresh, 3000);
                     self._send_json(200, master._service_discovery.summary())
 
                 elif re.match(rf"{_API_V1}/discovery/services/([^/]+)$", path):
-                    if not self._check_auth("viewer"):
+                    if not self._check_auth("discovery:read"):
                         return
                     if master._service_discovery is None:
                         self._send_json(503, {
@@ -1524,7 +1613,7 @@ setInterval(refresh, 3000);
                     })
 
                 elif path == f"{_API_V1}/regions":
-                    if not self._check_auth("viewer"):
+                    if not self._check_auth("regions:read"):
                         return
                     if master._multi_region is None:
                         self._send_json(503, {
@@ -1535,7 +1624,7 @@ setInterval(refresh, 3000);
                     self._send_json(200, master._multi_region.summary())
 
                 elif re.match(rf"{_API_V1}/regions/([^/]+)$", path):
-                    if not self._check_auth("viewer"):
+                    if not self._check_auth("regions:read"):
                         return
                     if master._multi_region is None:
                         self._send_json(503, {
@@ -1552,7 +1641,7 @@ setInterval(refresh, 3000);
                     })
 
                 elif path == f"{_API_V1}/breakers":
-                    if not self._check_auth("viewer"):
+                    if not self._check_auth("breakers:read"):
                         return
                     if master._circuit_breaker is None:
                         self._send_json(503, {
@@ -1563,7 +1652,7 @@ setInterval(refresh, 3000);
                     self._send_json(200, master._circuit_breaker.summary())
 
                 elif re.match(rf"{_API_V1}/breakers/([^/]+)$", path):
-                    if not self._check_auth("viewer"):
+                    if not self._check_auth("breakers:read"):
                         return
                     if master._circuit_breaker is None:
                         self._send_json(503, {
@@ -1582,7 +1671,7 @@ setInterval(refresh, 3000);
                         self._send_json(200, state)
 
                 elif path == f"{_API_V1}/ratelimits":
-                    if not self._check_auth("viewer"):
+                    if not self._check_auth("ratelimits:read"):
                         return
                     if master._rate_limiter is None:
                         self._send_json(503, {
@@ -1593,7 +1682,7 @@ setInterval(refresh, 3000);
                     self._send_json(200, master._rate_limiter.summary())
 
                 elif re.match(rf"{_API_V1}/ratelimits/([^/]+)$", path):
-                    if not self._check_auth("viewer"):
+                    if not self._check_auth("ratelimits:read"):
                         return
                     if master._rate_limiter is None:
                         self._send_json(503, {
@@ -1612,7 +1701,7 @@ setInterval(refresh, 3000);
                         self._send_json(200, bucket)
 
                 elif path == f"{_API_V1}/canary/status":
-                    if not self._check_auth("viewer"):
+                    if not self._check_auth("canary:read"):
                         return
                     if master._canary is None:
                         self._send_json(503, {
@@ -1623,7 +1712,7 @@ setInterval(refresh, 3000);
                     self._send_json(200, master._canary.status())
 
                 elif path == f"{_API_V1}/observability/status":
-                    if not self._check_auth("viewer"):
+                    if not self._check_auth("observability:read"):
                         return
                     if master._observability is None:
                         self._send_json(503, {
@@ -1634,7 +1723,7 @@ setInterval(refresh, 3000);
                     self._send_json(200, master._observability.summary())
 
                 elif path == f"{_API_V1}/observability/logs":
-                    if not self._check_auth("viewer"):
+                    if not self._check_auth("observability:read"):
                         return
                     if master._observability is None:
                         self._send_json(503, {
@@ -1663,13 +1752,13 @@ setInterval(refresh, 3000);
                     self._send_json(200, {"events": events, "count": len(events)})
 
                 elif path == f"{_API_V1}/metrics":
-                    if not self._check_auth("viewer"):
+                    if not self._check_auth("metrics:read"):
                         return
                     self._send_text(200, master.prometheus_metrics(),
                                      "text/plain; version=0.0.4; charset=utf-8")
 
                 elif path == f"{_API_V1}/nodes":
-                    if not self._check_auth("viewer"):
+                    if not self._check_auth("nodes:read"):
                         return
 
                     qs = urllib.parse.parse_qs(
@@ -1714,7 +1803,7 @@ setInterval(refresh, 3000);
                     })
 
                 elif re.match(rf"{_API_V1}/nodes/([^/]+)$", path):
-                    if not self._check_auth("viewer"):
+                    if not self._check_auth("nodes:read"):
                         return
                     node_id = path.rsplit("/", 1)[-1]
                     with master._lock:
@@ -1772,7 +1861,7 @@ setInterval(refresh, 3000);
 
                 #  All other POSTs are write operations — check leader 
                 elif path == f"{_API_V1}/nodes/join":
-                    if not self._check_auth("admin"):
+                    if not self._check_auth("nodes:write"):
                         return
                     if not self._check_leader():
                         return
@@ -1784,7 +1873,7 @@ setInterval(refresh, 3000);
                     self._send_json(200 if result.get("ok") else 400, result)
 
                 elif re.match(rf"{_API_V1}/nodes/([^/]+)/heartbeat$", path):
-                    if not self._check_auth("admin"):
+                    if not self._check_auth("nodes:write"):
                         return
                     if not self._check_leader():
                         return
@@ -1798,7 +1887,7 @@ setInterval(refresh, 3000);
                     self._send_json(200 if result.get("ok") else 404, result)
 
                 elif path == f"{_API_V1}/scheduler/report":
-                    if not self._check_auth("admin"):
+                    if not self._check_auth("scheduler:write"):
                         return
                     if master._scheduler is None:
                         self._send_json(503, {
@@ -1828,7 +1917,7 @@ setInterval(refresh, 3000);
                     f"{_API_V1}/rollout/resume",
                     f"{_API_V1}/rollout/abort",
                 ):
-                    if not self._check_auth("admin"):
+                    if not self._check_auth("rollout:control"):
                         return
                     if master._rolling_updater is None:
                         self._send_json(503, {
@@ -1863,7 +1952,7 @@ setInterval(refresh, 3000);
                         })
 
                 elif path == f"{_API_V1}/discovery/announce":
-                    if not self._check_auth("admin"):
+                    if not self._check_auth("discovery:write"):
                         return
                     if master._service_discovery is None:
                         self._send_json(503, {
@@ -1886,7 +1975,7 @@ setInterval(refresh, 3000);
                         "node_id": node_id, "service": service})
 
                 elif path == f"{_API_V1}/regions/announce":
-                    if not self._check_auth("admin"):
+                    if not self._check_auth("regions:write"):
                         return
                     if master._multi_region is None:
                         self._send_json(503, {
@@ -1909,7 +1998,7 @@ setInterval(refresh, 3000);
                         "node_id": node_id, "region": region})
 
                 elif re.match(rf"{_API_V1}/breakers/([^/]+)/reset$", path):
-                    if not self._check_auth("admin"):
+                    if not self._check_auth("breakers:reset"):
                         return
                     if master._circuit_breaker is None:
                         self._send_json(503, {
@@ -1925,7 +2014,7 @@ setInterval(refresh, 3000);
                     })
 
                 elif re.match(rf"{_API_V1}/ratelimits/([^/]+)/reset$", path):
-                    if not self._check_auth("admin"):
+                    if not self._check_auth("ratelimits:reset"):
                         return
                     if master._rate_limiter is None:
                         self._send_json(503, {
@@ -1946,7 +2035,7 @@ setInterval(refresh, 3000);
                     f"{_API_V1}/canary/promote",
                     f"{_API_V1}/canary/abort",
                 ):
-                    if not self._check_auth("admin"):
+                    if not self._check_auth("canary:control"):
                         return
                     if master._canary is None:
                         self._send_json(503, {
@@ -1983,7 +2072,7 @@ setInterval(refresh, 3000);
                         })
 
                 elif path == f"{_API_V1}/canary/announce":
-                    if not self._check_auth("admin"):
+                    if not self._check_auth("canary:control"):
                         return
                     if master._canary is None:
                         self._send_json(503, {
@@ -2016,7 +2105,7 @@ setInterval(refresh, 3000);
                         self.headers.get("X-Trace-Id"))
                 m = re.match(rf"{_API_V1}/nodes/([^/]+)$", path)
                 if m:
-                    if not self._check_auth("admin"):
+                    if not self._check_auth("nodes:write"):
                         return
                     if not self._check_leader():
                         return
@@ -2027,7 +2116,7 @@ setInterval(refresh, 3000);
                 elif re.match(
                     rf"{_API_V1}/discovery/services/([^/]+)/([^/]+)$", path
                 ):
-                    if not self._check_auth("admin"):
+                    if not self._check_auth("discovery:write"):
                         return
                     if master._service_discovery is None:
                         self._send_json(503, {

@@ -6,6 +6,80 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 
 
+## [4.15.0] - 2026-08-20
+
+### Added — Fine-grained RBAC permission scopes
+
+**The gap:** RBAC was binary — `admin` (everything) or `viewer`
+(everything read-only). No way to grant a key, say, exactly
+`canary:control` without also handing it the ability to delete nodes
+or reset rate limits.
+
+**`MasterNode`'s `api_keys` values can now be either:**
+- a built-in role name string, `"admin"` or `"viewer"` — unchanged
+  from all prior versions, expands to a scope bundle internally
+- an iterable of specific permission scope strings, e.g.
+  `["canary:read", "canary:control"]`, for exact fine-grained access
+
+20 scopes across every REST resource (`nodes:read`/`nodes:write`,
+`canary:read`/`canary:control`, `breakers:reset`, `rollout:control`,
+etc. — full table in `docs/CLUSTER.md` "Fine-grained permissions").
+`admin` = all 20; `viewer` = every `*:read` scope.
+
+- Scopes are resolved and validated **once, at `MasterNode`
+  construction time**, not per-request — an unrecognized role name or
+  scope string raises `ValueError` immediately with the full list of
+  valid options, rather than starting up and silently denying access
+  later when a request happens to come in (same fail-fast philosophy
+  as v4.13.0's `--features` validation)
+- A 403 response now names the specific missing scope
+  (`"this API key lacks required 'canary:control' permission"`)
+  instead of a role name, making it obvious which grant is missing
+- All 31 of the master's `_check_auth(...)` call sites were converted
+  from the old `"viewer"`/`"admin"` role-rank check to the new
+  scope-based check — every REST endpoint now maps to a specific,
+  documented scope
+- **Fully backward compatible**: every existing `api_keys={"key":
+  "admin"}` / `"viewer"` config behaves identically to before this
+  change — verified with the full existing `test_cluster_master.py` +
+  `test_admin_api.py` suite (one test's expectation was intentionally
+  updated: an unrecognized role now fails at construction time instead
+  of failing closed per-request, which is strictly safer, not a
+  regression)
+
+**CLI**
+- `--api-key KEY=VALUE` now accepts a comma-separated scope list as
+  `VALUE` (e.g. `--api-key ci-key=nodes:read,canary:control`) alongside
+  the existing `admin`/`viewer` role strings. A single colon-less token
+  is treated as an attempted role name (so a typo like `superadmin`
+  reports "unknown role", the more useful message); anything
+  containing a colon, or more than one comma-separated item, is
+  treated as a scope list
+- Bad scopes/roles now exit cleanly with a one-line `error: ...`
+  message and a non-zero exit code, not a raw Python traceback
+
+**Docs**
+- New "Fine-grained permissions" subsection under Authentication in
+  `docs/CLUSTER.md`, with the full scope-to-endpoint table
+
+**Tests**
+- `tests/test_rbac_fine_grained.py` (new, 22 tests): unit tests for
+  scope resolution/validation, construction-time fail-fast behavior,
+  and real HTTP integration tests proving a narrowly-scoped key can do
+  exactly what it was granted and nothing else
+- `tests/test_cli_rbac.py` (new, 6 tests): CLI `--api-key` parsing for
+  legacy roles, comma-separated scopes, single specific scopes, mixed
+  keys, and clean (non-traceback) errors on bad input
+- `tests/test_cluster_master.py`: one existing test updated to match
+  the (safer) construction-time-validation behavior described above
+- Full regression: `test_cluster_master.py` + `test_admin_api.py` +
+  `test_rbac_fine_grained.py` + `test_cli_features.py` +
+  `test_cluster_canary_deployment.py` + `test_cluster_circuit_breaker.py`
+  + `test_cluster_rate_limiter.py` re-run clean, no regressions
+  (272 + 38 = 310 tests across affected files)
+
+---
+
 ## [4.14.0] - 2026-08-06
 
 ### Added — Helm chart (`deploy/helm/huddlecluster/`)

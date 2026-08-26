@@ -279,6 +279,75 @@ huddle-cluster agent start --id node-1 --master http://host:7070 --port 8080 --a
 huddle-cluster nodes list --api-key dashboard-key
 ```
 
+### Fine-grained permissions
+
+As of v4.15.0, an API key can be granted a specific list of permission
+scopes instead of only the built-in `admin`/`viewer` roles — useful for
+giving, say, a CI pipeline exactly `canary:control` without also
+handing it the ability to delete nodes.
+
+```python
+master = MasterNode(
+    port=7070,
+    api_keys={
+        "admin-secret":  "admin",                              # unchanged — full access
+        "dashboard-key": "viewer",                              # unchanged — read-only
+        "ci-pipeline":   ["canary:read", "canary:control"],      # new — exactly these two
+        "breaker-bot":   ["breakers:reset"],                     # new — nothing else
+    },
+)
+```
+
+Or via the CLI (comma-separated scopes):
+
+```bash
+huddle-cluster master start --port 7070 \
+    --api-key "ci-pipeline=canary:read,canary:control" \
+    --api-key "admin-secret=admin"
+```
+
+All available scopes:
+
+| Scope | Grants |
+|---|---|
+| `status:read` | `GET /v1/status` |
+| `metrics:read` | `GET /v1/metrics` |
+| `nodes:read` | `GET /v1/nodes`, `GET /v1/nodes/{id}` |
+| `nodes:write` | join, heartbeat, `DELETE /v1/nodes/{id}` |
+| `scheduler:read` | `GET /v1/scheduler/next`, `GET /v1/scheduler/stats` |
+| `scheduler:write` | `POST /v1/scheduler/report` |
+| `autoscaler:read` | `GET /v1/autoscaler/status` |
+| `rollout:read` | `GET /v1/rollout/status` |
+| `rollout:control` | start/pause/resume/abort a rolling update |
+| `discovery:read` | `GET /v1/discovery/services[/{name}]` |
+| `discovery:write` | announce/deregister a service |
+| `regions:read` | `GET /v1/regions[/{name}]` |
+| `regions:write` | announce a region |
+| `breakers:read` | `GET /v1/breakers[/{id}]` |
+| `breakers:reset` | `POST /v1/breakers/{id}/reset` |
+| `ratelimits:read` | `GET /v1/ratelimits[/{id}]` |
+| `ratelimits:reset` | `POST /v1/ratelimits/{id}/reset` |
+| `canary:read` | `GET /v1/canary/status` |
+| `canary:control` | start/advance/promote/abort/announce a canary |
+| `observability:read` | `GET /v1/observability/status`, `GET /v1/observability/logs` |
+
+Notes:
+- `admin` expands to every scope above; `viewer` expands to every
+  `*:read` scope. Existing `api_keys={"key": "admin"}` / `"viewer"`
+  configs are completely unaffected — this is purely additive.
+- Scopes are validated **once, at `MasterNode` construction time** (or
+  CLI startup) — an unrecognized role name or scope string raises
+  `ValueError` immediately with the full list of valid options, rather
+  than silently starting up and only denying access when a request
+  happens to come in later.
+- A 403 response names the specific missing scope, e.g.
+  `{"error": "this API key lacks required 'canary:control' permission"}`
+  — no guessing which of several endpoints a key can't reach.
+- There's no scope for granting `HA`/`ha:*` actions — the two HA RPC
+  endpoints (`/v1/ha/vote`, `/v1/ha/sync`) are peer-to-peer and
+  intentionally unauthenticated (see the REST API table above); that's
+  unrelated to `api_keys` and unaffected by this feature.
+
 ---
 
 ## Auto Recovery
@@ -454,7 +523,7 @@ own browser's localStorage.
 ```bash
 huddle-cluster master start  [--host] [--port] [--timeout] [--flap-window]
                              [--flap-threshold] [--quarantine-recovery]
-                             [--purge-after] [--api-key KEY=ROLE ...]
+                             [--purge-after] [--api-key KEY=ROLE_OR_SCOPES ...]
                              [--tls-cert] [--tls-key] [--tls-ca] [--tls-require-client-cert]
                              [--state-file] [--state-save-interval]
                              [--features PATH_OR_JSON]
@@ -1292,3 +1361,4 @@ Auto recovery · Prometheus metrics · RBAC/auth · Web dashboard · REST API ex
 - [x] Autoscaler status-reporting fix (`last_decision`/`last_reason` during cooldown) — v4.12.0
 - [x] CLI `--features` — circuit breaker/rate limiter/canary/autoscaler/service discovery/observability/HA all configurable without writing Python — v4.13.0
 - [x] Helm chart — v4.14.0. Base path (single master + agent DaemonSet) deployed and verified against a real Kubernetes cluster; HA/TLS/`--features` modes render correctly but haven't specifically been verified running inside a cluster yet — see [Deployment](#deployment)
+- [x] Fine-grained RBAC — 20 permission scopes across every REST resource, `admin`/`viewer` roles kept as backward-compatible scope bundles — v4.15.0

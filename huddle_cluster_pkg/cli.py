@@ -219,7 +219,7 @@ def cmd_master_start(args: argparse.Namespace) -> None:
         datefmt="%H:%M:%S",
     )
 
-    api_keys: Optional[Dict[str, str]] = None
+    api_keys: Optional[Dict[str, Any]] = None
     if args.api_key:
         api_keys = {}
         for item in args.api_key:
@@ -227,8 +227,26 @@ def cmd_master_start(args: argparse.Namespace) -> None:
                 print(f"[warn] ignoring malformed --api-key entry: {item!r} "
                       f"(expected KEY=ROLE, e.g. --api-key secret123=admin)")
                 continue
-            k, role = item.split("=", 1)
-            api_keys[k.strip()] = role.strip()
+            k, value = item.split("=", 1)
+            k = k.strip()
+            # A single legacy role name ("admin"/"viewer") stays a
+            # string, exactly as before v4.15.0. Anything else — a
+            # single specific scope, or a comma-separated list of
+            # scopes — becomes a fine-grained permission list.
+            # MasterNode validates the actual scope names at
+            # construction time and fails fast with a clear message
+            # on a typo.
+            parts = [p.strip() for p in value.split(",") if p.strip()]
+            if len(parts) == 1 and ":" not in parts[0]:
+                # No colon -> shaped like an attempted role name, not a
+                # scope (every real scope is "resource:action"). Pass
+                # through as a string so an unrecognized value here
+                # reports as "unknown role" rather than "unknown scope"
+                # — the more useful message for what's likely a typo'd
+                # role, e.g. --api-key key=superadmin.
+                api_keys[k] = parts[0]
+            else:
+                api_keys[k] = parts
 
     features: Dict[str, Any] = {}
     if args.features:
@@ -243,30 +261,35 @@ def cmd_master_start(args: argparse.Namespace) -> None:
             canary=features.get("canary"),
         )
 
-    master = MasterNode(
-        host=args.host,
-        port=args.port,
-        heartbeat_timeout_sec=args.timeout,
-        flap_window_sec=args.flap_window,
-        flap_threshold=args.flap_threshold,
-        quarantine_recovery_heartbeats=args.quarantine_recovery,
-        purge_after_sec=args.purge_after,
-        api_keys=api_keys,
-        tls_certfile=args.tls_cert,
-        tls_keyfile=args.tls_key,
-        tls_ca_certs=args.tls_ca,
-        tls_require_client_cert=args.tls_require_client_cert,
-        state_file=args.state_file,
-        state_save_interval_sec=args.state_save_interval,
-        scheduler=scheduler,
-        circuit_breaker=features.get("circuit_breaker"),
-        rate_limiter=features.get("rate_limiter"),
-        canary=features.get("canary"),
-        autoscaler=features.get("autoscaler"),
-        service_discovery=features.get("service_discovery"),
-        observability=features.get("observability"),
-        ha=features.get("ha"),
-    )
+    try:
+        master = MasterNode(
+            host=args.host,
+            port=args.port,
+            heartbeat_timeout_sec=args.timeout,
+            flap_window_sec=args.flap_window,
+            flap_threshold=args.flap_threshold,
+            quarantine_recovery_heartbeats=args.quarantine_recovery,
+            purge_after_sec=args.purge_after,
+            api_keys=api_keys,
+            tls_certfile=args.tls_cert,
+            tls_keyfile=args.tls_key,
+            tls_ca_certs=args.tls_ca,
+            tls_require_client_cert=args.tls_require_client_cert,
+            state_file=args.state_file,
+            state_save_interval_sec=args.state_save_interval,
+            scheduler=scheduler,
+            circuit_breaker=features.get("circuit_breaker"),
+            rate_limiter=features.get("rate_limiter"),
+            canary=features.get("canary"),
+            autoscaler=features.get("autoscaler"),
+            service_discovery=features.get("service_discovery"),
+            observability=features.get("observability"),
+            ha=features.get("ha"),
+        )
+    except ValueError as e:
+        # e.g. a bad --api-key scope/role, or invalid TLS combination —
+        # a clean one-line message and exit(1), not a raw traceback.
+        raise SystemExit(f"error: {e}")
 
     def on_join(node):
         print(f"  ✓  JOIN        {node.node_id:<20} {node.address}:{node.port}")
@@ -484,10 +507,15 @@ def build_parser() -> argparse.ArgumentParser:
     ms.add_argument("--purge-after", type=float, default=None,
                     help="Remove dead nodes from the registry after this many seconds "
                          "(default: never purge)")
-    ms.add_argument("--api-key", action="append", metavar="KEY=ROLE",
-                    help="Add an API key with a role (admin or viewer); repeatable, "
-                         "e.g. --api-key secret123=admin --api-key view456=viewer. "
-                         "If never given, the API is open (no auth).")
+    ms.add_argument("--api-key", action="append", metavar="KEY=ROLE_OR_SCOPES",
+                    help="Add an API key; repeatable. Value is either a built-in "
+                         "role (admin or viewer) or a comma-separated list of "
+                         "specific permission scopes for fine-grained access "
+                         "(v4.15.0+), e.g. --api-key secret123=admin "
+                         "--api-key ci-key=nodes:read,canary:control. "
+                         "See docs/CLUSTER.md \"Fine-grained permissions\" for "
+                         "the full list of scopes. If never given, the API is "
+                         "open (no auth).")
     ms.add_argument("--tls-cert", default=None, metavar="PATH",
                     help="Path to a TLS certificate file. Enables HTTPS; "
                          "requires --tls-key. Omit for plain HTTP (default).")

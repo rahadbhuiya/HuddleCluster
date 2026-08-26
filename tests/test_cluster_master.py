@@ -1067,14 +1067,16 @@ class TestAuthentication:
             m.stop()
 
     def test_unrecognized_role_has_no_access(self):
-        """A key mapped to a typo'd/unknown role fails closed, not open."""
-        m = self._make_master({"odd-key": "superadmin"})
-        try:
-            with pytest.raises(urllib.error.HTTPError) as exc:
-                _get(m.port, "/status", api_key="odd-key")
-            assert exc.value.code == 403
-        finally:
-            m.stop()
+        """
+        A key mapped to a typo'd/unknown role fails closed — as of
+        v4.15.0, this now fails fast at MasterNode construction time
+        (a clear ValueError naming the bad role and valid options)
+        rather than silently starting up and only denying access when
+        a request actually comes in. Strictly safer: a typo is caught
+        at deploy time instead of surfacing as mysterious 403s later.
+        """
+        with pytest.raises(ValueError, match="unknown role 'superadmin'"):
+            self._make_master({"odd-key": "superadmin"})
 
     def test_multiple_admin_keys_all_work(self):
         m = self._make_master({"key-a": "admin", "key-b": "admin"})
