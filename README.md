@@ -168,6 +168,20 @@ Under server failure, P95 latency stays under **86 ms** where NGINX round-robin 
 
 ---
 
+## Commercial Support & Consulting
+
+Need specialized architecture, custom integrations, or production deployment assistance?
+
+We offer direct engineering support and consulting:
+- **Custom Adapters & Integrations:** Tailoring HuddleCluster for your custom stack (AI/LLM inference clusters, high-frequency trading, IoT).
+- **Production Deployment & Tuning:** Multi-region HA setup, Kubernetes migration, and stress testing.
+- **Priority Enterprise Support & SLAs:** Dedicated hotline, rapid issue resolution, and feature requests.
+
+**Contact:** [rahadbhuiya2021@gmail.com](mailto:rahadbhuiya2021@gmail.com)  
+**Support this open-source project:** [GitHub Sponsors](https://github.com/sponsors/rahadbhuiya) | [Buy Me a Coffee](https://buymeacoffee.com/rahadbhuiya)
+
+---
+
 ## Citation
 
 ```
