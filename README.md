@@ -5,13 +5,15 @@
 <p align="center">
   <a href="https://pypi.org/project/huddle-cluster/"><img src="https://img.shields.io/pypi/v/huddle-cluster?color=0e7a0e&label=PyPI" alt="PyPI version"/></a>
   <a href="https://pypi.org/project/huddle-cluster/"><img src="https://img.shields.io/pypi/pyversions/huddle-cluster?color=0e7a0e" alt="Python versions"/></a>
+  <a href="https://rahadbhuiya.github.io/HuddleCluster/"><img src="https://img.shields.io/badge/website-live%20demo-0e7a0e" alt="Website and Live Demo"/></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"/></a>
   <a href="https://doi.org/10.5281/zenodo.20348019"><img src="https://img.shields.io/badge/DOI-10.5281%2Fzenodo.20348019-blue" alt="DOI"/></a>
   <a href="https://github.com/rahadbhuiya/HuddleCluster/actions"><img src="https://img.shields.io/github/actions/workflow/status/rahadbhuiya/HuddleCluster/ci.yml?label=tests" alt="CI"/></a>
 </p>
 
 <p align="center">
-  <strong>Penguin-inspired self-organizing load balancer with adaptive thermal eviction.</strong>
+  <strong>Penguin-inspired self-organizing load balancer with adaptive thermal eviction.</strong><br>
+  <a href="https://rahadbhuiya.github.io/HuddleCluster/">Interactive Simulation &amp; Live Architecture &rarr;</a>
 </p>
 
 ---
@@ -135,6 +137,7 @@ Under server failure, P95 latency stays under **86 ms** where NGINX round-robin 
 
 | | |
 |---|---|
+| **Interactive Website & Demo** | [`rahadbhuiya.github.io/HuddleCluster`](https://rahadbhuiya.github.io/HuddleCluster/) |
 | **Single-instance guide** | [`USAGE.md`](USAGE.md) |
 | **Cluster system** | [`docs/CLUSTER.md`](docs/CLUSTER.md) — MasterNode, Scheduler, RBAC, dashboard, API |
 | **API explorer** | `http://your-master:7070/v1/docs` (live, once the master is running) |
