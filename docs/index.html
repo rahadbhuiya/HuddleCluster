@@ -1,0 +1,956 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HuddleCluster - Penguin-Inspired Self-Organizing Load Balancer</title>
+    <meta name="description" content="A self-organizing server load balancer with adaptive thermal eviction inspired by emperor penguin huddles.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0d14;
+            --bg-secondary: #111726;
+            --bg-card: rgba(18, 24, 38, 0.7);
+            --border: rgba(255, 255, 255, 0.08);
+            --border-hover: rgba(56, 189, 248, 0.3);
+            --text-main: #f1f5f9;
+            --text-muted: #94a3b8;
+            --accent: #38bdf8;
+            --accent-glow: rgba(56, 189, 248, 0.15);
+            --emerald: #10b981;
+            --amber: #f59e0b;
+            --rose: #f43f5e;
+            --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+        }
+
+
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+
+
+        body {
+            background-color: var(--bg-primary);
+            color: var(--text-main);
+            font-family: var(--font-sans);
+            line-height: 1.6;
+            overflow-x: hidden;
+            -webkit-font-smoothing: antialiased;
+        }
+
+
+
+        a {
+            color: var(--accent);
+            text-decoration: none;
+            transition: opacity 0.2s;
+        }
+
+        a:hover {
+            opacity: 0.85;
+        }
+
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 24px;
+        }
+
+
+
+        /* Navigation */
+        nav {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 100;
+            background: rgba(10, 13, 20, 0.8);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .nav-inner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            height: 70px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-weight: 700;
+            font-size: 1.25rem;
+            color: #fff;
+            letter-spacing: -0.02em;
+        }
+
+
+        .brand-badge {
+            font-size: 0.75rem;
+            font-family: var(--font-mono);
+            padding: 2px 8px;
+            background: rgba(56, 189, 248, 0.12);
+            color: var(--accent);
+            border: 1px solid rgba(56, 189, 248, 0.25);
+            border-radius: 9999px;
+            font-weight: 500;
+        }
+
+        .nav-links {
+            display: flex;
+            align-items: center;
+            gap: 28px;
+            list-style: none;
+        }
+
+        .nav-links a {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+            font-weight: 500;
+        }
+
+        .nav-links a:hover {
+            color: #fff;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 10px 20px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            border-radius: 8px;
+            transition: all 0.2s ease;
+            cursor: pointer;
+            border: none;
+        }
+
+        .btn-primary {
+            background: #fff;
+            color: #000;
+        }
+
+        .btn-primary:hover {
+            background: #e2e8f0;
+            opacity: 1;
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--text-main);
+            border: 1px solid var(--border);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: rgba(255, 255, 255, 0.2);
+            opacity: 1;
+        }
+
+        /* Hero */
+        .hero {
+            padding-top: 150px;
+            padding-bottom: 80px;
+            position: relative;
+        }
+
+        .hero-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            background: rgba(16, 185, 129, 0.1);
+            border: 1px solid rgba(16, 185, 129, 0.25);
+            border-radius: 9999px;
+            color: var(--emerald);
+            font-size: 0.85rem;
+            font-weight: 500;
+            margin-bottom: 24px;
+        }
+
+        .hero-pill-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--emerald);
+            box-shadow: 0 0 8px var(--emerald);
+        }
+
+        .hero h1 {
+            font-size: clamp(2.5rem, 5vw, 4.2rem);
+            font-weight: 800;
+            line-height: 1.15;
+            letter-spacing: -0.03em;
+            margin-bottom: 24px;
+            max-width: 900px;
+        }
+
+        .hero h1 span {
+            background: linear-gradient(135deg, #fff 30%, var(--accent) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero-desc {
+            font-size: 1.25rem;
+            color: var(--text-muted);
+            max-width: 760px;
+            line-height: 1.6;
+            margin-bottom: 36px;
+        }
+
+        .hero-actions {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-bottom: 48px;
+        }
+
+
+
+        .install-box {
+            display: flex;
+            align-items: center;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px 16px;
+            font-family: var(--font-mono);
+            font-size: 0.9rem;
+            color: #cbd5e1;
+        }
+
+        .install-box code {
+            user-select: all;
+        }
+
+        /* Simulation Canvas Box */
+        .simulation-wrapper {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 24px;
+            backdrop-filter: blur(16px);
+            margin-bottom: 100px;
+            box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.5);
+        }
+
+        .simulation-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 20px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border);
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+
+        .simulation-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+
+        .sim-stats {
+            display: flex;
+            gap: 20px;
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+        }
+
+        .sim-stat-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .sim-stat-label {
+            color: var(--text-muted);
+        }
+
+        .sim-stat-value {
+            color: var(--accent);
+            font-weight: 600;
+        }
+
+        #clusterCanvas {
+            width: 100%;
+            height: 380px;
+            display: block;
+            border-radius: 12px;
+            background: radial-gradient(circle at center, rgba(56, 189, 248, 0.04) 0%, transparent 70%);
+        }
+
+        /* Features Section */
+        .section-header {
+            text-align: center;
+            margin-bottom: 60px;
+        }
+
+        .section-tag {
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            color: var(--accent);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            margin-bottom: 12px;
+            display: block;
+        }
+
+        .section-header h2 {
+            font-size: 2.4rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            margin-bottom: 16px;
+        }
+
+        .section-header p {
+            color: var(--text-muted);
+            max-width: 650px;
+            margin: 0 auto;
+            font-size: 1.1rem;
+        }
+
+
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 24px;
+            margin-bottom: 120px;
+        }
+
+        .feature-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 32px;
+            transition: all 0.3s ease;
+        }
+
+        .feature-card:hover {
+            border-color: var(--border-hover);
+            transform: translateY(-4px);
+            box-shadow: 0 12px 24px -10px rgba(56, 189, 248, 0.1);
+        }
+
+        .feature-badge {
+            display: inline-block;
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            color: var(--accent);
+            background: rgba(56, 189, 248, 0.1);
+            padding: 4px 10px;
+            border-radius: 6px;
+            margin-bottom: 16px;
+        }
+
+        .feature-card h3 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 12px;
+            color: #fff;
+        }
+
+        .feature-card p {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+            line-height: 1.6;
+        }
+
+        /* Comparison Table */
+        .comparison-wrapper {
+            margin-bottom: 120px;
+            overflow-x: auto;
+        }
+
+        table.comparison-table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 0.95rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .comparison-table th, .comparison-table td {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .comparison-table th {
+            background: var(--bg-secondary);
+            font-weight: 600;
+            color: #fff;
+        }
+
+        .comparison-table tr:hover td {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .highlight-col {
+            background: rgba(56, 189, 248, 0.05);
+            font-weight: 500;
+            color: var(--accent);
+        }
+
+        /* Code Showcase */
+        .code-section {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 40px;
+            align-items: center;
+            margin-bottom: 120px;
+        }
+
+        @media (max-width: 900px) {
+            .code-section {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .code-info h2 {
+            font-size: 2.2rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            margin-bottom: 16px;
+        }
+
+        .code-info p {
+            color: var(--text-muted);
+            margin-bottom: 24px;
+            font-size: 1.05rem;
+        }
+
+        .code-block {
+            background: #060911;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            overflow-x: auto;
+            color: #e2e8f0;
+            line-height: 1.7;
+        }
+
+        .code-keyword { color: #f472b6; }
+        .code-func { color: #60a5fa; }
+        .code-str { color: #34d399; }
+        .code-comment { color: #64748b; }
+
+        /* Support Banner */
+        .support-banner {
+            background: linear-gradient(135deg, rgba(56, 189, 248, 0.1) 0%, rgba(16, 185, 129, 0.05) 100%);
+            border: 1px solid rgba(56, 189, 248, 0.2);
+            border-radius: 16px;
+            padding: 48px;
+            text-align: center;
+            margin-bottom: 100px;
+        }
+
+        .support-banner h2 {
+            font-size: 2rem;
+            margin-bottom: 16px;
+        }
+
+        .support-banner p {
+            color: var(--text-muted);
+            max-width: 600px;
+            margin: 0 auto 32px;
+            font-size: 1.05rem;
+        }
+
+        /* Footer */
+        footer {
+            border-top: 1px solid var(--border);
+            padding: 60px 0 40px;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
+        .footer-inner {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+
+        .footer-links {
+            display: flex;
+            gap: 24px;
+            list-style: none;
+        }
+
+        /* Mobile Responsiveness */
+        @media (max-width: 768px) {
+            .nav-inner {
+                height: 60px;
+            }
+            .brand-badge {
+                display: none;
+            }
+            .nav-links {
+                gap: 14px;
+            }
+            .nav-links li:nth-child(1),
+            .nav-links li:nth-child(3),
+            .nav-links li:nth-child(4) {
+                display: none;
+            }
+            .hero {
+                padding-top: 100px;
+                padding-bottom: 50px;
+            }
+            .hero h1 {
+                font-size: 2.1rem;
+            }
+            .hero-desc {
+                font-size: 1rem;
+            }
+            .hero-actions {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .install-box, .btn {
+                width: 100%;
+                justify-content: center;
+                text-align: center;
+            }
+            .simulation-wrapper {
+                padding: 16px;
+                margin-bottom: 60px;
+            }
+            .simulation-header {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            .sim-stats {
+                flex-wrap: wrap;
+                gap: 12px;
+                width: 100%;
+            }
+            .features-grid {
+                margin-bottom: 70px;
+            }
+            .feature-card {
+                padding: 24px;
+            }
+            .comparison-wrapper {
+                margin-bottom: 70px;
+            }
+            .code-section {
+                margin-bottom: 70px;
+            }
+            .support-banner {
+                padding: 32px 18px;
+                margin-bottom: 60px;
+            }
+            .support-banner h2 {
+                font-size: 1.6rem;
+            }
+            .footer-inner {
+                flex-direction: column;
+                text-align: center;
+            }
+            .footer-links {
+                flex-wrap: wrap;
+                justify-content: center;
+            }
+        }
+    </style>
+
+
+</head>
+
+<body>
+
+    <!-- Nav -->
+    <nav>
+        <div class="container nav-inner">
+            <div class="brand">
+                HuddleCluster
+                <span class="brand-badge">v4.15.0</span>
+            </div>
+            <ul class="nav-links">
+                <li><a href="#architecture">Architecture</a></li>
+                <li><a href="#features">Features</a></li>
+                <li><a href="#comparison">Benchmarks</a></li>
+                <li><a href="#consulting">Consulting</a></li>
+                <li><a href="https://github.com/rahadbhuiya/HuddleCluster" target="_blank">GitHub</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <!-- Hero -->
+    <section class="hero">
+        <div class="container">
+            <div class="hero-pill">
+                <div class="hero-pill-dot"></div>
+                Bio-Inspired Load Balancing
+            </div>
+            <h1>
+                Servers that self-organize like <span>Emperor Penguins</span>
+            </h1>
+            <p class="hero-desc">
+                Traditional load balancers rely on rigid thresholds and binary health checks, causing cascading stampedes during traffic spikes. HuddleCluster introduces adaptive ring rotation: hot nodes drift outward to cool down, and recovered nodes rotate back inward automatically.
+            </p>
+            <div class="hero-actions">
+                <div class="install-box">
+                    <code>pip install huddle-cluster</code>
+                </div>
+                <a href="https://github.com/rahadbhuiya/HuddleCluster" target="_blank" class="btn btn-primary">
+                    View on GitHub
+                </a>
+                <a href="mailto:rahadbhuiya2021@gmail.com" class="btn btn-secondary">
+                    Engineering Support
+                </a>
+            </div>
+
+            <!-- Simulation Window -->
+            <div class="simulation-wrapper">
+                <div class="simulation-header">
+                    <div class="simulation-title">Live Huddle Ring Simulation</div>
+                    <div class="sim-stats">
+                        <div class="sim-stat-item">
+                            <span class="sim-stat-label">Core Nodes:</span>
+                            <span class="sim-stat-value" id="statCore">4</span>
+                        </div>
+                        <div class="sim-stat-item">
+                            <span class="sim-stat-label">Cooling Ring:</span>
+                            <span class="sim-stat-value" id="statCooling">2</span>
+                        </div>
+                        <div class="sim-stat-item">
+                            <span class="sim-stat-label">Throughput:</span>
+                            <span class="sim-stat-value" id="statThroughput">1,420 rps</span>
+                        </div>
+                        <div class="sim-stat-item">
+                            <span class="sim-stat-label">Status:</span>
+                            <span class="sim-stat-value" style="color: #10b981;">Self-Healing</span>
+                        </div>
+                    </div>
+                </div>
+                <canvas id="clusterCanvas"></canvas>
+            </div>
+        </div>
+    </section>
+
+    <!-- Architecture & Features -->
+    <section id="features" class="container">
+        <div class="section-header">
+            <span class="section-tag">Cluster Primitives</span>
+            <h2>Engineered for Distributed Resiliency</h2>
+            <p>From single-process microservices to multi-region cloud meshes without operational overhead.</p>
+        </div>
+
+        <div class="features-grid">
+            <div class="feature-card">
+                <span class="feature-badge">Thermal Eviction</span>
+                <h3>Adaptive Ring Rotation</h3>
+                <p>Nodes experiencing high error rates, compute saturation, or latency anomalies smoothly transition to outer rings, shedding load while preserving active connections.</p>
+            </div>
+
+            <div class="feature-card">
+                <span class="feature-badge">High Availability</span>
+                <h3>Raft-Simplified Consensus</h3>
+                <p>Master-Agent architecture featuring automatic leader election, distributed state persistence, and write-forwarding across cluster coordinators.</p>
+            </div>
+
+            <div class="feature-card">
+                <span class="feature-badge">Zero Downtime</span>
+                <h3>Canary & Rolling Updates</h3>
+                <p>Weight-based canary traffic splitting with automated health gates. Promote or abort releases safely without customer-facing interruptions.</p>
+            </div>
+
+            <div class="feature-card">
+                <span class="feature-badge">Cloud Native</span>
+                <h3>Kubernetes & Helm</h3>
+                <p>Out-of-the-box Kubernetes Service Discovery, ready-to-deploy Helm charts, and automated container image publishing on GitHub Container Registry.</p>
+            </div>
+
+            <div class="feature-card">
+                <span class="feature-badge">Security First</span>
+                <h3>Fine-Grained RBAC & mTLS</h3>
+                <p>Mutual TLS node authentication with client certificate Common Name validation and granular permission scopes across all management endpoints.</p>
+            </div>
+
+            <div class="feature-card">
+                <span class="feature-badge">Observability</span>
+                <h3>Prometheus & OpenTelemetry</h3>
+                <p>Structured JSON event logging, distributed trace identifiers, and real-time metric export compatible with Jaeger, Tempo, and Grafana.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Code Section -->
+    <section id="architecture" class="container">
+        <div class="code-section">
+            <div class="code-info">
+                <span class="section-tag">Zero Configuration</span>
+                <h2>Clean, Async-First Developer Experience</h2>
+                <p>Deploy in less than 10 lines of Python or orchestrate fleets across multiple datacenters using the built-in CLI command plane.</p>
+                <div style="display: flex; gap: 12px; margin-top: 20px;">
+                    <a href="https://github.com/rahadbhuiya/HuddleCluster" target="_blank" class="btn btn-secondary">Read Documentation</a>
+                </div>
+            </div>
+            <div class="code-block">
+<pre><span class="code-keyword">from</span> huddle_cluster <span class="code-keyword">import</span> create_cluster
+<span class="code-keyword">import</span> requests
+
+<span class="code-comment"># Create self-organizing cluster pool</span>
+cluster = <span class="code-func">create_cluster</span>([
+    (<span class="code-str">"web-1"</span>, <span class="code-str">"10.0.0.1"</span>, 8080),
+    (<span class="code-str">"web-2"</span>, <span class="code-str">"10.0.0.2"</span>, 8080),
+    (<span class="code-str">"web-3"</span>, <span class="code-str">"10.0.0.3"</span>, 8080),
+])
+cluster.<span class="code-func">start</span>()
+
+<span class="code-comment"># Automatic thermal-aware request routing</span>
+<span class="code-keyword">with</span> cluster.<span class="code-func">get_server_context</span>() <span class="code-keyword">as</span> server:
+    resp = requests.<span class="code-func">get</span>(<span class="code-str">f"http://{server.host}:{server.port}/api"</span>)
+
+<span class="code-comment"># Inspect self-healing status</span>
+print(cluster.<span class="code-func">health_report</span>())
+<span class="code-comment"># => {"fairness_score": 0.94, "rotation_count": 12, "cluster_health": "healthy"}</span></pre>
+            </div>
+        </div>
+    </section>
+
+    <!-- Comparison -->
+    <section id="comparison" class="container">
+        <div class="section-header">
+            <span class="section-tag">Architectural Benchmark</span>
+            <h2>How HuddleCluster Compares</h2>
+            <p>Moving beyond legacy binary health checks and static weighting algorithms.</p>
+        </div>
+
+        <div class="comparison-wrapper">
+            <table class="comparison-table">
+                <thead>
+                    <tr>
+                        <th>Feature / Behavior</th>
+                        <th class="highlight-col">HuddleCluster</th>
+                        <th>NGINX / HAProxy</th>
+                        <th>Standard Kube-Proxy</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Failure Mode</td>
+                        <td class="highlight-col">Adaptive Thermal Shedding</td>
+                        <td>Hard Timeout Severing</td>
+                        <td>Even Packet Round-Robin</td>
+                    </tr>
+                    <tr>
+                        <td>Stampede Prevention</td>
+                        <td class="highlight-col">Continuous Ring Redistribution</td>
+                        <td>Prone to Domino Collapse</td>
+                        <td>None (Manual HPA tuning)</td>
+                    </tr>
+                    <tr>
+                        <td>Threshold Configuration</td>
+                        <td class="highlight-col">Autonomous (Self-Healing)</td>
+                        <td>Manual Static Configuration</td>
+                        <td>Static iptables / IPVS</td>
+                    </tr>
+                    <tr>
+                        <td>Node Recovery</td>
+                        <td class="highlight-col">Automatic Ring Convergence</td>
+                        <td>Binary Flapping Thresholds</td>
+                        <td>Kubelet Readiness Probe</td>
+                    </tr>
+
+                    <tr>
+                        <td>Footprint</td>
+                        <td class="highlight-col">Zero Dependency Core</td>
+                        <td>Binary Daemon / C Config</td>
+                        <td>Kernel Netfilter Daemon</td>
+                    </tr>
+                </tbody>
+            </table>
+            
+        </div>
+    </section>
+
+
+    <!-- Commercial Support -->
+    <section id="consulting" class="container">
+        <div class="support-banner">
+            <span class="section-tag">Commercial Support & Consulting</span>
+            <h2>Deploy with Engineering Confidence</h2>
+            <p>
+                Need custom adaptations for high-throughput AI/LLM clusters, multi-region failover setups, or production performance tuning? We offer direct architectural consulting and enterprise SLAs.
+            </p>
+            <div style="display: flex; justify-content: center; gap: 16px; flex-wrap: wrap;">
+                <a href="mailto:rahadbhuiya2021@gmail.com" class="btn btn-primary">
+                    Contact: rahadbhuiya2021@gmail.com
+                </a>
+                <a href="https://github.com/sponsors/rahadbhuiya" target="_blank" class="btn btn-secondary">
+                    Sponsor on GitHub
+                </a>
+            </div>
+        </div>
+    </section>
+
+
+
+
+    <!-- Footer -->
+    <footer>
+        <div class="container footer-inner">
+            <div>
+                <strong>HuddleCluster</strong> &bull; Author: Rahad Bhuiya &bull; MIT License
+            </div>
+            <ul class="footer-links">
+                <li><a href="https://doi.org/10.5281/zenodo.20348019" target="_blank">Zenodo DOI</a></li>
+                <li><a href="https://github.com/rahadbhuiya/HuddleCluster" target="_blank">GitHub Repository</a></li>
+                <li><a href="https://pypi.org/project/huddle-cluster/" target="_blank">PyPI Package</a></li>
+            </ul>
+        </div>
+    </footer>
+
+    <!-- Interactive Simulation Script -->
+    <script>
+        const canvas = document.getElementById('clusterCanvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            const padding = window.innerWidth < 768 ? 32 : 48;
+            canvas.width = Math.max(280, canvas.parentElement.clientWidth - padding);
+            canvas.height = window.innerWidth < 768 ? 300 : 380;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        const nodes = [
+            { id: 'web-01', ring: 'inner', angle: 0, speed: 0.008, heat: 0.2 },
+            { id: 'web-02', ring: 'inner', angle: 1.2, speed: 0.007, heat: 0.35 },
+            { id: 'web-03', ring: 'outer', angle: 2.5, speed: 0.005, heat: 0.82 },
+            { id: 'web-04', ring: 'inner', angle: 3.8, speed: 0.009, heat: 0.15 },
+            { id: 'web-05', ring: 'outer', angle: 4.9, speed: 0.004, heat: 0.74 },
+            { id: 'web-06', ring: 'inner', angle: 5.8, speed: 0.008, heat: 0.4 }
+        ];
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            const cx = canvas.width / 2;
+            const cy = canvas.height / 2;
+            const innerRadius = Math.min(cx, cy) * 0.45;
+            const outerRadius = Math.min(cx, cy) * 0.8;
+
+            // Draw Inner Ring (Core)
+            ctx.beginPath();
+            ctx.arc(cx, cy, innerRadius, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(56, 189, 248, 0.25)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([6, 6]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Draw Outer Ring (Cooling)
+            ctx.beginPath();
+            ctx.arc(cx, cy, outerRadius, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(148, 163, 184, 0.15)';
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([4, 4]);
+
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Labels
+            ctx.font = '11px JetBrains Mono, monospace';
+            ctx.fillStyle = 'rgba(56, 189, 248, 0.6)';
+            ctx.textAlign = 'center';
+            ctx.fillText('CORE ACTIVE RING', cx, cy - innerRadius - 12);
+
+            ctx.fillStyle = 'rgba(148, 163, 184, 0.4)';
+            ctx.fillText('OUTER COOLING RING', cx, cy - outerRadius - 12);
+
+            // Animate Nodes
+            let innerCount = 0;
+            let outerCount = 0;
+
+            nodes.forEach((node, i) => {
+                node.angle += node.speed;
+
+                // Thermal dynamics
+                if (node.ring === 'inner') {
+                    node.heat += 0.0015;
+                    innerCount++;
+                    if (node.heat > 0.8) {
+                        node.ring = 'outer'; // Thermal Eviction
+                    }
+                } else {
+                    node.heat -= 0.002;
+                    outerCount++;
+                    if (node.heat < 0.25) {
+                        node.ring = 'inner'; // Cooled, rotate back inward
+                    }
+                }
+
+                const targetR = node.ring === 'inner' ? innerRadius : outerRadius;
+                if (!node.currentR) node.currentR = targetR;
+                node.currentR += (targetR - node.currentR) * 0.05;
+
+                const x = cx + Math.cos(node.angle) * node.currentR;
+                const y = cy + Math.sin(node.angle) * node.currentR;
+
+                // Color based on heat
+                let color = '#38bdf8';
+                if (node.heat > 0.7) color = '#f43f5e';
+                else if (node.heat > 0.45) color = '#f59e0b';
+                else color = '#10b981';
+
+                // Connecting beam to center
+                if (node.ring === 'inner') {
+                    ctx.beginPath();
+                    ctx.moveTo(cx, cy);
+                    ctx.lineTo(x, y);
+                    ctx.strokeStyle = 'rgba(56, 189, 248, 0.08)';
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                }
+
+                // Node circle
+                ctx.beginPath();
+                ctx.arc(x, y, 12, 0, Math.PI * 2);
+                ctx.fillStyle = color;
+                ctx.shadowColor = color;
+                
+                ctx.shadowBlur = 12;
+                ctx.fill();
+                ctx.shadowBlur = 0;
+
+                // Node label
+                ctx.fillStyle = '#fff';
+                ctx.font = '10px JetBrains Mono, monospace';
+                ctx.fillText(node.id, x, y + 24);
+            });
+
+            document.getElementById('statCore').innerText = innerCount;
+            document.getElementById('statCooling').innerText = outerCount;
+
+            requestAnimationFrame(draw);
+        }
+
+        draw();
+    </script>
+</body>
+</html>
