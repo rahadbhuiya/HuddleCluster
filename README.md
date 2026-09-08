@@ -167,7 +167,13 @@ Under server failure, P95 latency stays under **86 ms** where NGINX round-robin 
 - HA failover staleness fix + documented Raft limitations — v4.7
 - OTLP log export (Jaeger/Tempo/OTel Collector compatible) — v4.8
 - Docker + Kubernetes deployment manifests, SIGTERM graceful shutdown fix — v4.9
-- WAN-latency simulation benchmark (partial — see docs for scope) — v4.10, Level 5 complete (7/7 addressed; 2 items — Raft hardening and WAN validation — improved but honestly still partial, see docs/CLUSTER.md)
+- WAN-latency simulation benchmark (partial — see docs for scope) — v4.10, Level 5 complete
+- Agent TLS trust for self-signed certificates — v4.11
+- AutoScaler cooldown reporting and status accuracy — v4.12
+- CLI feature wiring (`--features`) for production master — v4.13
+- Production Helm chart with StatefulSet HA discovery — v4.14
+- Fine-grained RBAC with 20 granular permission scopes — v4.15
+- Cloud-native probes (`/healthz`, `/livez`, `/readyz`) and HA readiness gates — v4.16
 
 ---
 

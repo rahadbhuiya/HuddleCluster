@@ -205,6 +205,8 @@ class MasterNode:
 
     REST API (all responses are JSON):
 
+        GET  /healthz, /livez                 → {"status": "ok"} (root liveness probe)
+        GET  /readyz                          → {"status": "ready"} (readiness probe)
         GET  /v1/health                       → {"status": "ok"}
         GET  /v1/openapi.json                 → OpenAPI 3.0 spec for this API
         GET  /v1/docs                         → interactive Swagger UI
@@ -373,6 +375,19 @@ class MasterNode:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    def is_ready(self) -> bool:
+        """
+        Check if the MasterNode is ready to accept traffic and coordinate nodes.
+        In standalone mode, returns True if the master is running.
+        In High Availability (HA) mode, delegates to HA readiness (True if leader,
+        or follower with a known active leader).
+        """
+        if not self._running:
+            return False
+        if self._ha is not None:
+            return self._ha.is_ready()
+        return True
 
     def start(self) -> None:
         """Start the master node (non-blocking). Raises if already running."""
@@ -1154,6 +1169,56 @@ setInterval(refresh, 3000);
                         },
                     },
                 },
+                "/healthz": {
+                    "get": {
+                        "operationId": "getHealthz",
+                        "summary": "Cloud/K8s liveness check (never requires auth)",
+                        "security": [],
+                        "responses": {
+                            "200": {"description": "Master is live",
+                                     "content": {"application/json": {"schema": {
+                                         "type": "object",
+                                         "properties": {"status": {"type": "string", "enum": ["ok"]}},
+                                     }}}},
+                        },
+                    },
+                },
+                "/livez": {
+                    "get": {
+                        "operationId": "getLivez",
+                        "summary": "Cloud/K8s liveness check alias (never requires auth)",
+                        "security": [],
+                        "responses": {
+                            "200": {"description": "Master is live",
+                                     "content": {"application/json": {"schema": {
+                                         "type": "object",
+                                         "properties": {"status": {"type": "string", "enum": ["ok"]}},
+                                     }}}},
+                        },
+                    },
+                },
+                "/readyz": {
+                    "get": {
+                        "operationId": "getReadyz",
+                        "summary": "Cloud/K8s readiness check (never requires auth)",
+                        "security": [],
+                        "responses": {
+                            "200": {"description": "Master is ready to serve",
+                                     "content": {"application/json": {"schema": {
+                                         "type": "object",
+                                         "properties": {"status": {"type": "string", "enum": ["ready"]}},
+                                     }}}},
+                            "503": {"description": "Master is not ready",
+                                     "content": {"application/json": {"schema": {
+                                         "type": "object",
+                                         "properties": {
+                                             "status": {"type": "string", "enum": ["not_ready"]},
+                                             "error": {"type": "string"},
+                                         },
+                                     }}}},
+                        },
+                    },
+                },
                 "/openapi.json": {
                     "get": {
                         "operationId": "getOpenApiSpec",
@@ -1504,6 +1569,16 @@ setInterval(refresh, 3000);
                 if path == "/dashboard":
                     self._send_text(200, master.dashboard_html(),
                                      "text/html; charset=utf-8")
+
+                elif path in ("/healthz", "/livez", f"{_API_V1}/healthz", f"{_API_V1}/livez"):
+                    self._send_json(200, {"status": "ok"})   # cloud liveness probe, never requires auth
+
+                elif path in ("/readyz", f"{_API_V1}/readyz"):
+                    # cloud readiness probe, never requires auth
+                    if master.is_ready():
+                        self._send_json(200, {"status": "ready"})
+                    else:
+                        self._send_json(503, {"status": "not_ready", "error": "master is not ready"})
 
                 elif path == f"{_API_V1}/health":
                     self._send_json(200, {"status": "ok"})   # never requires auth

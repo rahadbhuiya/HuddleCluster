@@ -246,6 +246,23 @@ class ClusterHA:
         with self._lock:
             return self._role == LEADER
 
+    def is_ready(self) -> bool:
+        """Readiness predicate for cloud probes and load balancers.
+        Returns True if:
+          - Node is LEADER (actively serving and coordinating)
+          - Node is FOLLOWER and has identified an active leader
+          - Standalone node (no peers)
+        Returns False if CANDIDATE (election in progress) or uncoordinated FOLLOWER.
+        """
+        with self._lock:
+            if not self._running:
+                return False
+            if self._role == LEADER:
+                return True
+            if self._role == FOLLOWER:
+                return (not self._peers) or (self._leader_id is not None)
+            return False
+
     def role(self) -> str:
         with self._lock:
             return self._role

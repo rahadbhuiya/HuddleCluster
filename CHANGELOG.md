@@ -6,6 +6,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 
 
+## [4.16.0] - 2026-09-08
+
+### Added — Cloud-native root probes (`/healthz`, `/livez`, `/readyz`) and HA readiness gates
+
+**The gap:** `MasterNode` previously only served liveness probes under `/v1/health`. Standard cloud orchestrators (Kubernetes, AWS ALB, GCP GKE, ingress controllers) expect root-level convention probes: `/healthz` / `/livez` for liveness and `/readyz` for readiness gating. In HA setups, there was also no unified readiness predicate to stop routing traffic to uncoordinated followers or partitioned nodes undergoing election.
+
+**What was added:**
+- **Root Liveness Probes (`/healthz`, `/livez`):** Root-level liveness endpoints returning 200 `{"status": "ok"}` without authentication, confirming the master process and HTTP loop are active. Also accessible under `/v1/healthz` and `/v1/livez` for backwards compatibility.
+- **Readiness Probe (`/readyz`):** Readiness endpoint returning 200 `{"status": "ready"}` when ready to serve, or 503 `{"status": "not_ready", "error": "..."}` when unready.
+- **HA Readiness Gate (`ClusterHA.is_ready()`):** In HA clusters, readiness reports ready only if the node is the active leader or a connected follower with a known leader. Returns not ready (503) if in candidate election state or partitioned without an elected leader. Standalone nodes return ready whenever running.
+- **Helm Chart Update:** `deploy/helm/huddlecluster/values.yaml` updated to use `/healthz` for `livenessProbe` and `/readyz` for `readinessProbe`, and image tag bumped to `4.16.0`.
+- **OpenAPI 3.0 & Swagger UI:** Documented `/healthz`, `/livez`, and `/readyz` endpoints in `openapi_spec()`.
+
+---
+
 ## [4.15.0] - 2026-08-20
 
 ### Added — Fine-grained RBAC permission scopes

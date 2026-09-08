@@ -41,6 +41,8 @@ master.start()
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
+| `GET` | `/healthz`, `/livez` | none | Kubernetes/cloud liveness probe |
+| `GET` | `/readyz` | none | Kubernetes/cloud readiness probe |
 | `GET` | `/v1/health` | none | Liveness check |
 | `GET` | `/v1/openapi.json` | none | OpenAPI 3.0 spec |
 | `GET` | `/v1/docs` | none | Interactive Swagger UI |
@@ -270,7 +272,7 @@ master = MasterNode(
 )
 ```
 
-Every request needs `Authorization: Bearer <key>` except `/v1/health`, `/v1/openapi.json`, `/v1/docs`, and `/dashboard`.
+Every request needs `Authorization: Bearer <key>` except `/healthz`, `/livez`, `/readyz`, `/v1/health`, `/v1/openapi.json`, `/v1/docs`, and `/dashboard`.
 
 Agents and CLI commands take `--api-key`:
 

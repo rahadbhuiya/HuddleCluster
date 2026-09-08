@@ -4,7 +4,7 @@
 
 image:
   repository: huddlecluster
-  tag: "4.13.0"
+  tag: "4.16.0"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -93,13 +93,13 @@ master:
 
   livenessProbe:
     httpGet:
-      path: /v1/health
+      path: /healthz
       port: http
     initialDelaySeconds: 5
     periodSeconds: 10
   readinessProbe:
     httpGet:
-      path: /v1/health
+      path: /readyz
       port: http
     initialDelaySeconds: 2
     periodSeconds: 5

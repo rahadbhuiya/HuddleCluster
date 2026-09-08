@@ -4,8 +4,8 @@ description: >-
   HuddleCluster — a penguin-inspired, self-organizing load balancer with
   adaptive thermal eviction, deployed as a master + agent DaemonSet.
 type: application
-version: 0.1.0
-appVersion: "4.13.0"
+version: 0.2.0
+appVersion: "4.16.0"
 keywords:
   - load-balancer
   - cluster-management
