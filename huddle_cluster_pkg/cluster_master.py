@@ -72,6 +72,7 @@ _ALL_PERMISSIONS: frozenset = frozenset({
     "ratelimits:read", "ratelimits:reset",
     "canary:read", "canary:control",
     "observability:read",
+    "webhooks:read", "webhooks:write",
 })
 
 _READ_PERMISSIONS: frozenset = frozenset(
@@ -283,6 +284,7 @@ class MasterNode:
         rate_limiter: Optional[Any] = None,
         canary: Optional[Any] = None,
         observability: Optional[Any] = None,
+        webhooks: Optional[Any] = None,
         on_node_join: Optional[Callable[[NodeRecord], None]] = None,
         on_node_leave: Optional[Callable[[NodeRecord], None]] = None,
         on_node_dead: Optional[Callable[[NodeRecord], None]] = None,
@@ -340,6 +342,7 @@ class MasterNode:
         self._rate_limiter       = rate_limiter
         self._canary             = canary
         self._observability      = observability
+        self._webhooks           = webhooks
         if rolling_updater is not None:
             rolling_updater.attach(self)
 
@@ -389,6 +392,10 @@ class MasterNode:
             return self._ha.is_ready()
         return True
 
+    @property
+    def webhooks(self) -> Optional[Any]:
+        return self._webhooks
+
     def start(self) -> None:
         """Start the master node (non-blocking). Raises if already running."""
         if self._running:
@@ -416,6 +423,8 @@ class MasterNode:
             self._canary.attach(self)
         if self._observability is not None:
             self._observability.attach(self)
+        if self._webhooks is not None:
+            self._webhooks.attach(self)
         logger.info("MasterNode started on %s:%d (timeout=%.0fs)",
                     self._host, self._port, self._timeout)
 
@@ -440,6 +449,8 @@ class MasterNode:
             self._canary.stop()
         if self._observability is not None:
             self._observability.stop()
+        if self._webhooks is not None:
+            self._webhooks.stop()
         if self._state_file:
             self._save_registry_snapshot()
         if self._http:
@@ -597,6 +608,7 @@ class MasterNode:
             "rate_limiter":      "enabled" if self._rate_limiter      is not None else "disabled",
             "canary":            self._canary.status() if self._canary is not None else "disabled",
             "observability":     self._observability.summary() if self._observability is not None else "disabled",
+            "webhooks":          {"enabled": True, "count": len(self._webhooks.list_subscriptions())} if self._webhooks is not None else "disabled",
         }
 
     def prometheus_metrics(self) -> str:
@@ -1336,7 +1348,7 @@ setInterval(refresh, 3000);
                 "/nodes/{node_id}/heartbeat": {
                     "post": {
                         "operationId": "heartbeat",
-                        "summary": "Send a heartbeat with optional forwarded metrics (requires admin role)",
+                        "summary": "Send a heartbeat with optional forwarded metrics",
                         "parameters": [
                             {"name": "node_id", "in": "path", "required": True, "schema": {"type": "string"}},
                         ],
@@ -1350,6 +1362,58 @@ setInterval(refresh, 3000);
                             "200": {"description": "Heartbeat recorded"},
                             "404": {"description": "Unknown node_id",
                                      "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                            **auth_responses,
+                        },
+                    },
+                },
+                "/webhooks": {
+                    "get": {
+                        "operationId": "listWebhooks",
+                        "summary": "List all active webhook subscriptions",
+                        "responses": {
+                            "200": {"description": "Webhook list"},
+                            **auth_responses,
+                        },
+                    },
+                    "post": {
+                        "operationId": "registerWebhook",
+                        "summary": "Register a new webhook subscription",
+                        "requestBody": {
+                            "required": True,
+                            "content": {"application/json": {"schema": {
+                                "type": "object",
+                                "required": ["url"],
+                                "properties": {
+                                    "url": {"type": "string"},
+                                    "events": {"type": "array", "items": {"type": "string"}},
+                                    "secret": {"type": "string"},
+                                    "headers": {"type": "object"},
+                                },
+                            }}}},
+                        "responses": {
+                            "201": {"description": "Webhook registered"},
+                            "400": {"description": "Validation error",
+                                     "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                            **auth_responses,
+                        },
+                    },
+                },
+                "/webhooks/deliveries": {
+                    "get": {
+                        "operationId": "listDeliveries",
+                        "summary": "Recent webhook delivery log",
+                        "responses": {
+                            "200": {"description": "Delivery history"},
+                            **auth_responses,
+                        },
+                    },
+                },
+                "/webhooks/test": {
+                    "post": {
+                        "operationId": "testWebhook",
+                        "summary": "Trigger a synthetic test ping to registered webhooks",
+                        "responses": {
+                            "200": {"description": "Test ping dispatched"},
                             **auth_responses,
                         },
                     },
@@ -1826,6 +1890,51 @@ setInterval(refresh, 3000);
                     )
                     self._send_json(200, {"events": events, "count": len(events)})
 
+                elif path == f"{_API_V1}/webhooks":
+                    if not self._check_auth("webhooks:read"):
+                        return
+                    if master._webhooks is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "webhooks is not enabled on this master",
+                        })
+                        return
+                    subs = master._webhooks.list_subscriptions()
+                    self._send_json(200, {"ok": True, "webhooks": subs, "count": len(subs)})
+
+                elif path == f"{_API_V1}/webhooks/deliveries":
+                    if not self._check_auth("webhooks:read"):
+                        return
+                    if master._webhooks is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "webhooks is not enabled on this master",
+                        })
+                        return
+                    qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                    try:
+                        limit = int(qs["limit"][0]) if "limit" in qs else 50
+                    except (ValueError, IndexError):
+                        limit = 50
+                    deliveries = master._webhooks.deliveries(limit=limit)
+                    self._send_json(200, {"ok": True, "deliveries": deliveries, "count": len(deliveries)})
+
+                elif path.startswith(f"{_API_V1}/webhooks/"):
+                    if not self._check_auth("webhooks:read"):
+                        return
+                    if master._webhooks is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "webhooks is not enabled on this master",
+                        })
+                        return
+                    wh_id = path[len(f"{_API_V1}/webhooks/"):]
+                    sub = master._webhooks.get_subscription(wh_id)
+                    if sub is None:
+                        self._send_json(404, {"ok": False, "error": f"webhook '{wh_id}' not found"})
+                        return
+                    self._send_json(200, {"ok": True, "webhook": sub})
+
                 elif path == f"{_API_V1}/metrics":
                     if not self._check_auth("metrics:read"):
                         return
@@ -2168,6 +2277,49 @@ setInterval(refresh, 3000);
                     self._send_json(200, {"ok": True, "node_id": node_id,
                         "tagged": "canary"})
 
+                elif path == f"{_API_V1}/webhooks":
+                    if not self._check_auth("webhooks:write"):
+                        return
+                    if master._webhooks is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "webhooks is not enabled on this master",
+                        })
+                        return
+                    body = self._read_json()
+                    if body is None or not isinstance(body, dict):
+                        self._send_json(400, {"ok": False, "error": "invalid JSON body"})
+                        return
+                    url = body.get("url")
+                    if not url:
+                        self._send_json(400, {"ok": False, "error": "'url' is required"})
+                        return
+                    try:
+                        sub = master._webhooks.register(
+                            url=url,
+                            events=body.get("events"),
+                            secret=body.get("secret"),
+                            headers=body.get("headers"),
+                        )
+                        self._send_json(201, {"ok": True, "webhook": sub.to_dict()})
+                    except ValueError as ve:
+                        self._send_json(400, {"ok": False, "error": str(ve)})
+
+                elif path == f"{_API_V1}/webhooks/test":
+                    if not self._check_auth("webhooks:write"):
+                        return
+                    if master._webhooks is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "webhooks is not enabled on this master",
+                        })
+                        return
+                    body = self._read_json() or {}
+                    target_id = body.get("webhook_id") if isinstance(body, dict) else None
+                    result = master._webhooks.test_ping(target_id=target_id)
+                    code = 200 if result.get("ok") else 400
+                    self._send_json(code, result)
+
                 else:
                     self._send_json(404, {"ok": False, "error": "not found"})
 
@@ -2206,6 +2358,22 @@ setInterval(refresh, 3000);
                     self._send_json(200 if ok else 404, {
                         "ok": ok,
                         "error": None if ok else f"'{node_id}' not registered for '{service}'",
+                    })
+
+                elif path.startswith(f"{_API_V1}/webhooks/"):
+                    if not self._check_auth("webhooks:write"):
+                        return
+                    if master._webhooks is None:
+                        self._send_json(503, {
+                            "ok": False,
+                            "error": "webhooks is not enabled on this master",
+                        })
+                        return
+                    wh_id = path[len(f"{_API_V1}/webhooks/"):]
+                    ok = master._webhooks.unregister(wh_id)
+                    self._send_json(200 if ok else 404, {
+                        "ok": ok,
+                        "error": None if ok else f"webhook '{wh_id}' not found",
                     })
 
                 else:

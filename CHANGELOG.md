@@ -19,6 +19,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Helm Chart Update:** `deploy/helm/huddlecluster/values.yaml` updated to use `/healthz` for `livenessProbe` and `/readyz` for `readinessProbe`, and image tag bumped to `4.16.0`.
 - **OpenAPI 3.0 & Swagger UI:** Documented `/healthz`, `/livez`, and `/readyz` endpoints in `openapi_spec()`.
 
+### Added — Cluster Webhooks & Real-time Alerts (`ClusterWebhooks`)
+
+**The gap:** Single-node HuddleCluster had localized alert webhooks, but the distributed cluster coordinator (`MasterNode`) lacked a centralized, asynchronous webhook dispatcher for cluster lifecycle events. External incident management systems (Slack, Discord, PagerDuty, or custom receivers) had to poll the REST API to detect node crashes, flap quarantines, or health degradation.
+
+**What was added:**
+- **`ClusterWebhooks` Component:** Dedicated background worker thread with non-blocking queue dispatching alerts to registered HTTP endpoints.
+- **HMAC-SHA256 Payload Signing:** Optional shared secret verification with `X-Huddle-Signature: sha256=...` header.
+- **Lifecycle Event Hooks:** Automatic dispatch on `node.joined`, `node.left`, `node.dead`, `node.quarantined`, `node.recovered`, `cluster.unhealthy`, `cluster.recovered`, and `webhook.test`.
+- **Exponential Backoff Retries:** Configurable retry attempts on network error or HTTP 5xx responses.
+- **REST Endpoints:**
+  - `GET /v1/webhooks` (auth: `webhooks:read`): List active webhook subscriptions.
+  - `POST /v1/webhooks` (auth: `webhooks:write`): Register a webhook subscription.
+  - `GET /v1/webhooks/{id}` (auth: `webhooks:read`): Single webhook details.
+  - `DELETE /v1/webhooks/{id}` (auth: `webhooks:write`): Unregister a webhook.
+  - `POST /v1/webhooks/test` (auth: `webhooks:write`): Trigger a synthetic test ping.
+  - `GET /v1/webhooks/deliveries` (auth: `webhooks:read`): Delivery history and status logs.
+- **RBAC Scopes:** Added `webhooks:read` and `webhooks:write` to fine-grained RBAC scopes.
+- **CLI & Feature Integration:** Added `--webhook URL` flag to `huddle-cluster master start` and `"webhooks"` block support to `--features`.
+
 ---
 
 ## [4.15.0] - 2026-08-20

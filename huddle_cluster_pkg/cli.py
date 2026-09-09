@@ -139,6 +139,7 @@ _FEATURE_CLASSES = {
     "service_discovery":  ("huddle_cluster_pkg.cluster_service_discovery","ServiceDiscovery"),
     "observability":      ("huddle_cluster_pkg.cluster_observability",    "ClusterObservability"),
     "ha":                 ("huddle_cluster_pkg.cluster_ha",               "ClusterHA"),
+    "webhooks":           ("huddle_cluster_pkg.cluster_webhooks",         "ClusterWebhooks"),
 }
 
 # Features whose presence should auto-wire a ClusterScheduler, since
@@ -261,6 +262,14 @@ def cmd_master_start(args: argparse.Namespace) -> None:
             canary=features.get("canary"),
         )
 
+    webhooks_inst = features.get("webhooks")
+    if getattr(args, "webhook", None):
+        from huddle_cluster_pkg.cluster_webhooks import ClusterWebhooks
+        if webhooks_inst is None:
+            webhooks_inst = ClusterWebhooks()
+        for u in args.webhook:
+            webhooks_inst.register(url=u)
+
     try:
         master = MasterNode(
             host=args.host,
@@ -285,6 +294,7 @@ def cmd_master_start(args: argparse.Namespace) -> None:
             service_discovery=features.get("service_discovery"),
             observability=features.get("observability"),
             ha=features.get("ha"),
+            webhooks=webhooks_inst,
         )
     except ValueError as e:
         # e.g. a bad --api-key scope/role, or invalid TLS combination —
@@ -546,6 +556,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "\"circuit_breaker\": {\"trip_threshold\": 0.5}}'. "
                          "See docs/CLUSTER.md \"CLI feature config\" for the full "
                          "schema and an example file.")
+    ms.add_argument("--webhook", action="append", metavar="URL",
+                    help="Register a webhook URL for cluster alerts; repeatable. "
+                         "Example: --webhook https://hooks.slack.com/services/...")
     ms.set_defaults(func=cmd_master_start)
 
     # agent

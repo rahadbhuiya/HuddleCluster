@@ -65,6 +65,7 @@ from huddle_cluster_pkg.cluster_circuit_breaker   import ClusterCircuitBreaker
 from huddle_cluster_pkg.cluster_rate_limiter        import ClusterRateLimiter
 from huddle_cluster_pkg.cluster_canary_deployment   import ClusterCanaryDeployment
 from huddle_cluster_pkg.cluster_observability       import ClusterObservability
+from huddle_cluster_pkg.cluster_webhooks            import ClusterWebhooks
 
 __all__ = [
     "MasterNode", "NodeRecord", "AgentNode",
@@ -72,5 +73,5 @@ __all__ = [
     "ClusterRollingUpdater", "ServiceDiscovery", "ClusterHA",
     "MultiRegionManager", "ClusterCircuitBreaker",
     "ClusterRateLimiter", "ClusterCanaryDeployment",
-    "ClusterObservability",
+    "ClusterObservability", "ClusterWebhooks",
 ]

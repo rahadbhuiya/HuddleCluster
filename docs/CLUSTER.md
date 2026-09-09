@@ -84,6 +84,12 @@ master.start()
 | `POST` | `/v1/canary/promote` | admin | Graduate canary to stable |
 | `POST` | `/v1/canary/abort` | admin | Return all traffic to stable |
 | `POST` | `/v1/canary/announce` | admin | Runtime-tag a node as canary |
+| `GET` | `/v1/webhooks` | viewer | List active webhook subscriptions |
+| `POST` | `/v1/webhooks` | admin | Register a webhook subscription |
+| `GET` | `/v1/webhooks/{id}` | viewer | Single webhook subscription details |
+| `DELETE` | `/v1/webhooks/{id}` | admin | Unregister a webhook |
+| `POST` | `/v1/webhooks/test` | admin | Dispatch synthetic test ping |
+| `GET` | `/v1/webhooks/deliveries` | viewer | Recent delivery log & status codes |
 | `GET` | `/dashboard` | none | Web topology dashboard |
 
 ---
@@ -332,6 +338,8 @@ All available scopes:
 | `canary:read` | `GET /v1/canary/status` |
 | `canary:control` | start/advance/promote/abort/announce a canary |
 | `observability:read` | `GET /v1/observability/status`, `GET /v1/observability/logs` |
+| `webhooks:read` | `GET /v1/webhooks[/{id}]`, `GET /v1/webhooks/deliveries` |
+| `webhooks:write` | register/unregister/test webhooks |
 
 Notes:
 - `admin` expands to every scope above; `viewer` expands to every
@@ -1111,6 +1119,88 @@ Notes:
   a very high-volume, multi-service trace (HuddleCluster's trace IDs
   are scoped to a single master's request lifecycle, not a full
   distributed span tree).
+
+---
+
+## Cluster Webhooks & Alerts
+
+As of v4.16.0, `MasterNode` features an asynchronous, signed webhook dispatcher (`ClusterWebhooks`) to send real-time cluster alerts to Slack, Discord, PagerDuty, or custom incident response services.
+
+### Event Types
+
+- `node.joined`: Node joins or registers with the cluster.
+- `node.left`: Node gracefully leaves.
+- `node.dead`: Node heartbeat timeout exceeded.
+- `node.quarantined`: Flapping node quarantined.
+- `node.recovered`: Quarantined or dead node restored to alive.
+- `cluster.unhealthy`: Cluster alive ratio drops below threshold.
+- `cluster.recovered`: Cluster alive ratio recovers above threshold.
+- `webhook.test`: Synthetic test ping.
+
+### Configuration
+
+```python
+from huddle_cluster_pkg import MasterNode, ClusterWebhooks
+
+webhooks = ClusterWebhooks(
+    webhooks=[
+        {
+            "url": "https://hooks.slack.com/services/...",
+            "events": ["node.dead", "cluster.unhealthy"],
+            "secret": "my-shared-hmac-secret",
+            "headers": {"X-Environment": "production"},
+        }
+    ],
+    max_retries=3,
+    timeout_sec=5.0,
+)
+
+master = MasterNode(port=7070, webhooks=webhooks)
+master.start()
+```
+
+### CLI usage
+
+Pass `--webhook` directly when starting the master:
+
+```bash
+huddle-cluster master start --port 7070 \
+    --webhook https://hooks.slack.com/services/...
+```
+
+Or configure via `--features`:
+
+```json
+{
+  "webhooks": {
+    "webhooks": [
+      {
+        "url": "https://alert-gateway.internal/webhook",
+        "events": ["*"],
+        "secret": "prod-secret-token"
+      }
+    ]
+  }
+}
+```
+
+### HMAC-SHA256 Verification
+
+When a `secret` is configured, outgoing POST requests include the `X-Huddle-Signature` header:
+
+```
+X-Huddle-Signature: sha256=<hex_hmac>
+X-Huddle-Event: node.dead
+X-Huddle-Delivery: del-9f3a1b2c
+X-Huddle-Timestamp: 1725801234.567
+```
+
+To verify in Python receiver:
+```python
+expected = "sha256=" + hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+if not hmac.compare_digest(request.headers.get("X-Huddle-Signature", ""), expected):
+    return "Invalid signature", 401
+```
 
 ---
 
