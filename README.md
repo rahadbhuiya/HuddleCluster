@@ -70,6 +70,18 @@ print(cluster.health_report())
 
 ---
 
+## 1-Minute Live Anomaly Demo
+
+Test how HuddleCluster handles relative latency anomalies, shields tail latency, and recovers:
+
+```bash
+python demos/reproducible_anomaly_demo.py
+```
+
+Under severe latency degradation (280ms+ injected spike into one node), HuddleCluster thermally evicts the degraded node within seconds, delivering **80% fewer slow requests** and shielding cluster P99 latency compared to traditional Round-Robin.
+
+---
+
 ## Multi-node cluster
 
 Coordinate a fleet of hosts — each node runs its own HuddleCluster; the master tracks enrollment, heartbeats, and health.
@@ -174,6 +186,7 @@ Under server failure, P95 latency stays under **86 ms** where NGINX round-robin 
 - Production Helm chart with StatefulSet HA discovery — v4.14
 - Fine-grained RBAC with 20 granular permission scopes — v4.15
 - Cloud-native probes (`/healthz`, `/livez`, `/readyz`) and HA readiness gates — v4.16
+- Cluster Webhooks with HMAC-SHA256 event dispatch and retry queue — v4.17
 
 ---
 

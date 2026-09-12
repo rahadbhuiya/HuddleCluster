@@ -40,6 +40,7 @@ calling a private method might.
 | `run_rate_limiter_demo.py` + `burst_sample.py` | Rate limiter — token bucket exhaustion + refill, concurrent burst | demo in one terminal, burst script in another |
 | `run_autoscaler_demo.py` | Auto scaler — node-count-based scale up/down, interactive | `python demos/run_autoscaler_demo.py` |
 | `run_service_discovery_demo.py` + `dns_query.py` | Service discovery — REST + DNS responder | demo in one terminal, `dns_query.py` in another |
+| `reproducible_anomaly_demo.py` | 1-minute anomaly & p99 shielding benchmark (HuddleCluster vs Round-Robin) | `python demos/reproducible_anomaly_demo.py` |
 
 All of these listen on `127.0.0.1:7070` by default — run one at a time
 (stop the previous one, Ctrl-C, before starting the next).
