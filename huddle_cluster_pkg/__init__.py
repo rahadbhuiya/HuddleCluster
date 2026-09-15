@@ -67,7 +67,10 @@ from huddle_cluster_pkg.cluster_canary_deployment   import ClusterCanaryDeployme
 from huddle_cluster_pkg.cluster_observability       import ClusterObservability
 from huddle_cluster_pkg.cluster_webhooks            import ClusterWebhooks
 
+__version__ = "4.18.0"
+
 __all__ = [
+    "__version__",
     "MasterNode", "NodeRecord", "AgentNode",
     "ClusterScheduler", "ClusterAutoScaler",
     "ClusterRollingUpdater", "ServiceDiscovery", "ClusterHA",

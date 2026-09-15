@@ -187,6 +187,7 @@ Under server failure, P95 latency stays under **86 ms** where NGINX round-robin 
 - Fine-grained RBAC with 20 granular permission scopes — v4.15
 - Cloud-native probes (`/healthz`, `/livez`, `/readyz`) and HA readiness gates — v4.16
 - Cluster Webhooks with HMAC-SHA256 event dispatch and retry queue — v4.17
+- Proactive synthetic canary prober with autonomous outer-ring cooldown promotion — v4.18
 
 ---
 

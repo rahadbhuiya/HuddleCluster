@@ -6,6 +6,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 
 
+## [4.18.0] - 2026-09-14
+
+### Added — Proactive Synthetic Canary Prober for Outer-Ring Autonomous Cooldown
+
+**The gap:** In HuddleCluster's self-organizing architecture, overheated or anomaly-prone servers are evicted to the outer resting ring where they receive zero client traffic. However, without client traffic, a resting server's rolling latency window and temperature become frozen unless an external metrics updater loop is provided. Even after a server's transient degradation (such as a garbage collection pause, CPU throttling, or connection flood) clears, the server remained in the outer ring until manually triggered or externally probed.
+
+**What was added:**
+- **Proactive Synthetic Canary Prober (`_canary_probe_loop`):** Dedicated background daemon thread that periodically sends lightweight synthetic HTTP GET probes (or TCP pings) exclusively to resting servers in `_outer_ring`. Active inner-ring servers are never perturbed.
+- **Configurable Prober Parameters:**
+  - `canary_probe_path`: Target probe path (e.g., `"/health"` or `"/livez"`). Prober is disabled when `None` (safe default).
+  - `canary_probe_interval_sec`: Probing interval across resting nodes (default: `3.0s`).
+  - `canary_probe_timeout_sec`: Timeout per probe attempt (default: `2.0s`).
+  - `canary_probe_pings_per_cycle`: Number of consecutive probe samples per cycle (default: `3`) to rapidly refresh the server's rolling latency window.
+- **Autonomous Cooldown & Promotion:** Canary probe latency is automatically fed into `record_latency(server, elapsed_ms)`. As the recovered server responds with healthy latency, its relative anomaly score and EMA temperature cool below `cool_threshold`, enabling `rotate()` to seamlessly promote it back into the inner active ring.
+- **Synchronous Diagnostic & Manual Trigger (`canary_probe_now()`):** Allows administrators, CLI commands, and automated test harnesses to trigger an on-demand probe cycle and inspect per-node recovery status.
+- **Telemetry & Diagnostics:** Added `canary_probe_status()` exported in `health_report()["canary_prober"]` and Prometheus metrics (`huddle_canary_probes_total`, `huddle_canary_probes_failed_total`, `huddle_canary_last_probe_ms`).
+- **Comprehensive Test Suite:** Added `tests/test_canary_prober.py` covering disabled mode, recovery lifecycle, background thread execution, error handling, and metrics exposition.
+
+---
+
 ## [4.16.0] - 2026-09-08
 
 ### Added — Cloud-native root probes (`/healthz`, `/livez`, `/readyz`) and HA readiness gates

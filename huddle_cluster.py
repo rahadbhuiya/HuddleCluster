@@ -125,7 +125,7 @@ from enum import Enum
 from typing import Any, Callable, Generator, Optional
 
 #  Version 
-__version__ = "4.16.0"
+__version__ = "4.18.0"
 __author__  = "Rahad Bhuiya"
 __license__ = "MIT"
 
@@ -708,6 +708,11 @@ class HuddleCluster:
         health_check_interval_sec: float           = 10.0,
         health_check_timeout_sec:  float           = 3.0,
         health_check_failures:     int             = 2,
+        # v4.18.0 built-in synthetic canary prober for outer-ring resting nodes
+        canary_probe_path:            Optional[str]   = None,
+        canary_probe_interval_sec:    float           = 3.0,
+        canary_probe_timeout_sec:     float           = 2.0,
+        canary_probe_pings_per_cycle: int             = 3,
     ):
         #  Validation 
         if cool_threshold >= heat_threshold:
@@ -814,6 +819,16 @@ class HuddleCluster:
         self._health_check_thread:   Optional[threading.Thread] = None
         # Per-server consecutive failure counters  {server_id: int}
         self._health_fail_counts:    dict                      = {}
+
+        # v4.18.0: built-in synthetic canary prober for outer-ring resting nodes
+        self._canary_probe_path:     Optional[str]             = canary_probe_path
+        self._canary_probe_interval: float                     = canary_probe_interval_sec
+        self._canary_probe_timeout:  float                     = canary_probe_timeout_sec
+        self._canary_probe_pings:    int                       = max(1, canary_probe_pings_per_cycle)
+        self._canary_probe_thread:   Optional[threading.Thread] = None
+        self._canary_probes_total:   int                       = 0
+        self._canary_probes_failed:  int                       = 0
+        self._canary_last_probe_ms:  float                     = 0.0
 
         # v1.4.0: Admin REST API
         self._admin_port:   Optional[int]                      = None
@@ -1926,6 +1941,15 @@ class HuddleCluster:
             )
             self._health_check_thread.start()
 
+        # Built-in synthetic canary prober thread (v4.18.0)
+        if self._canary_probe_path:
+            self._canary_probe_thread = threading.Thread(
+                target=self._canary_probe_loop,
+                name="huddle-canary-prober",
+                daemon=True,
+            )
+            self._canary_probe_thread.start()
+
         log.info(f"HuddleCluster started (interval={rotation_interval_sec}s)")
 
     def stop(self, timeout: float = 5.0, drain_timeout_sec: float = 0.0) -> None:
@@ -1974,6 +1998,8 @@ class HuddleCluster:
             self._alert_thread.join(timeout=timeout)
         if self._health_check_thread and self._health_check_thread.is_alive():
             self._health_check_thread.join(timeout=timeout)
+        if self._canary_probe_thread and self._canary_probe_thread.is_alive():
+            self._canary_probe_thread.join(timeout=timeout)
         if self._gossip_agent:
             self._gossip_agent.stop()
         log.info("HuddleCluster stopped")
@@ -2164,6 +2190,134 @@ class HuddleCluster:
                 ),
             })
         return result
+
+
+    # Built-in Synthetic Canary Prober (v4.18.0)
+
+
+    def _canary_probe_loop(self) -> None:
+        """
+        Background daemon thread: proactively probe resting servers in outer ring.
+
+        Sleeps first for canary_probe_interval_sec so startup is clean and non-racy.
+        """
+        while self._running:
+            deadline = time.monotonic() + self._canary_probe_interval
+            while self._running and time.monotonic() < deadline:
+                time.sleep(0.25)
+            if not self._running:
+                break
+            try:
+                self._run_canary_probes()
+            except Exception as exc:
+                log.warning(f"Canary probe loop error: {exc}")
+
+    def _run_canary_probes(self) -> None:
+        """Probe all resting servers in the outer ring once."""
+        path = self._canary_probe_path
+        if not path:
+            return
+
+        with self._lock:
+            outer_servers = list(self._outer_ring)
+        if not outer_servers:
+            return
+
+        for server in outer_servers:
+            url = f"http://{server.host}:{server.port}{path}"
+            for _ in range(self._canary_probe_pings):
+                if not self._running:
+                    break
+                t0 = time.perf_counter()
+                success = False
+                try:
+                    req = urllib.request.Request(url, method="GET")
+                    with urllib.request.urlopen(req, timeout=self._canary_probe_timeout) as resp:
+                        success = 200 <= resp.status < 300
+                    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                except Exception:
+                    elapsed_ms = self.request_timeout_ms
+                    success = False
+
+                with self._lock:
+                    self._canary_probes_total += 1
+                    self._canary_last_probe_ms = elapsed_ms
+                    if not success:
+                        self._canary_probes_failed += 1
+                        server.metrics.error_rate = min(1.0, server.metrics.error_rate * 0.9 + 0.1)
+
+                self.record_latency(server, elapsed_ms)
+
+    def canary_probe_now(self) -> dict:
+        """
+        Manually run one synchronous canary probe cycle across all outer-ring servers.
+
+        Returns a dictionary with probe results and updated temperatures.
+        """
+        path = self._canary_probe_path
+        if not path:
+            return {"enabled": False, "probed": 0, "results": []}
+
+        with self._lock:
+            outer_servers = list(self._outer_ring)
+
+        results = []
+        for server in outer_servers:
+            url = f"http://{server.host}:{server.port}{path}"
+            last_ms = 0.0
+            last_success = False
+            for _ in range(self._canary_probe_pings):
+                t0 = time.perf_counter()
+                success = False
+                try:
+                    req = urllib.request.Request(url, method="GET")
+                    with urllib.request.urlopen(req, timeout=self._canary_probe_timeout) as resp:
+                        success = 200 <= resp.status < 300
+                    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                except Exception:
+                    elapsed_ms = self.request_timeout_ms
+                    success = False
+
+                with self._lock:
+                    self._canary_probes_total += 1
+                    self._canary_last_probe_ms = elapsed_ms
+                    if not success:
+                        self._canary_probes_failed += 1
+                        server.metrics.error_rate = min(1.0, server.metrics.error_rate * 0.9 + 0.1)
+
+                self.record_latency(server, elapsed_ms)
+                last_ms = elapsed_ms
+                last_success = success
+
+            results.append({
+                "server_id": server.id,
+                "success": last_success,
+                "latency_ms": round(last_ms, 2),
+                "temperature": round(server.temperature, 4),
+                "cooled": server.is_cooled(self.cool_threshold),
+            })
+
+        return {
+            "enabled": True,
+            "probed": len(outer_servers),
+            "results": results,
+            "total_probes": self._canary_probes_total,
+        }
+
+    def canary_probe_status(self) -> dict:
+        """Return diagnostic metrics for the canary prober."""
+        return {
+            "enabled": bool(self._canary_probe_path),
+            "path": self._canary_probe_path,
+            "interval_sec": self._canary_probe_interval,
+            "timeout_sec": self._canary_probe_timeout,
+            "pings_per_cycle": self._canary_probe_pings,
+            "probes_total": self._canary_probes_total,
+            "probes_failed": self._canary_probes_failed,
+            "last_probe_ms": round(self._canary_last_probe_ms, 2),
+            "outer_servers_monitored": len(self._outer_ring),
+        }
+
 
     
     # Admin REST API
@@ -2992,6 +3146,7 @@ src.onerror=()=>{document.getElementById('err').style.display='block'};
                 "failure_threshold": self._health_check_failures,
                 "servers":        self.health_check_status(),
             },
+            "canary_prober":      self.canary_probe_status(),
             "alerts": {
                 "webhooks_configured": len(self._alert_webhooks),
                 "events_monitored":    sorted(self._alert_on),
@@ -3137,6 +3292,21 @@ src.onerror=()=>{document.getElementById('err').style.display='block'};
             f"huddle_cluster_retries_exhausted_total {self._retry_stats['exhausted_retries']}",
             "",
         ]
+        if self._canary_probe_path:
+            lines += [
+                "# HELP huddle_canary_probes_total Total synthetic canary probes sent",
+                "# TYPE huddle_canary_probes_total counter",
+                f"huddle_canary_probes_total {self._canary_probes_total}",
+                "",
+                "# HELP huddle_canary_probes_failed_total Total synthetic canary probe failures",
+                "# TYPE huddle_canary_probes_failed_total counter",
+                f"huddle_canary_probes_failed_total {self._canary_probes_failed}",
+                "",
+                "# HELP huddle_canary_last_probe_ms Latency of most recent canary probe",
+                "# TYPE huddle_canary_last_probe_ms gauge",
+                f"huddle_canary_last_probe_ms {self._canary_last_probe_ms:.2f}",
+                "",
+            ]
         return "\n".join(lines)
 
     def all_servers(self) -> list[Server]:
