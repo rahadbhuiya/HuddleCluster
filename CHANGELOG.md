@@ -6,6 +6,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 
 
+## [4.19.0] - 2026-09-15
+
+### Added — Adaptive Request Hedging & Speculative Execution (Google "Tail at Scale")
+
+**The gap:** Even in well-balanced distributed server clusters, transient tail latency (P99/P99.9) spikes occur inevitably due to background garbage collection pauses, temporary CPU throttling, I/O bus contention, or packet loss on upstream nodes. Standard retry policies wait until a full request timeout occurs before falling back, amplifying latency and degrading client SLOs.
+
+**What was added:**
+- **Adaptive Request Hedging (`hedged_request`):** Dispatches requests to the primary inner-ring server. If the primary does not respond within a dynamically calculated hedging delay (cluster P95 latency or configurable percentile/floor), a speculative backup request is dispatched concurrently to the coolest available server. Whichever server responds first wins, cancelling or ignoring the slower request.
+- **Dynamic P95 Hedging Delay:** Computes the hedging delay automatically based on the rolling P95 response latency across active inner-ring nodes, with a protective floor (`hedging_delay_floor_ms`, default: `25.0ms`).
+- **Hedging Traffic-Budget Safeguard:** Enforces a hard ratio safeguard (`hedging_budget_ratio`, default: `0.05` / 5%) to prevent speculative execution from overwhelming upstream servers or inducing cascading congestion during cluster-wide degradation. Excessive backups are throttled automatically.
+- **Non-Idempotent Request Exclusion (`allow_hedging=False`):** Provides an explicit switch to disable speculative hedging for state-mutating requests (e.g. POST, PUT, DELETE) while retaining single-execution fallback and latency tracking.
+- **Telemetry & Diagnostics:** Added `hedging_status()` exported in `health_report()["hedging"]` and Prometheus counters:
+  - `huddle_hedging_total_requests`: Total requests handled through hedging gateway.
+  - `huddle_hedging_hedged_requests_total`: Total speculative backup requests sent.
+  - `huddle_hedging_wins_total`: Total requests where the backup server beat the stalled primary.
+  - `huddle_hedging_throttled_total`: Total speculative requests suppressed by the traffic budget ratio.
+- **Comprehensive Test Suite:** Added `tests/test_request_hedging.py` testing fast path execution, speculative backup wins, budget ratio throttling, non-idempotent exclusion, error failover, and telemetry exposition.
+
+---
+
 ## [4.18.0] - 2026-09-14
 
 ### Added — Proactive Synthetic Canary Prober for Outer-Ring Autonomous Cooldown

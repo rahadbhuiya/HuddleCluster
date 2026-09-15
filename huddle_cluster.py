@@ -103,6 +103,7 @@ Changelog v1.1.0
 
 from __future__ import annotations
 
+import concurrent.futures
 import heapq
 import http.server
 import json
@@ -125,7 +126,7 @@ from enum import Enum
 from typing import Any, Callable, Generator, Optional
 
 #  Version 
-__version__ = "4.18.0"
+__version__ = "4.19.0"
 __author__  = "Rahad Bhuiya"
 __license__ = "MIT"
 
@@ -713,6 +714,12 @@ class HuddleCluster:
         canary_probe_interval_sec:    float           = 3.0,
         canary_probe_timeout_sec:     float           = 2.0,
         canary_probe_pings_per_cycle: int             = 3,
+        # v4.19.0 adaptive request hedging & speculative execution
+        hedging_enabled:              bool            = False,
+        hedging_delay_percentile:     float           = 95.0,
+        hedging_delay_floor_ms:       float           = 25.0,
+        hedging_budget_ratio:         float           = 0.05,
+        hedging_max_workers:          int             = 16,
     ):
         #  Validation 
         if cool_threshold >= heat_threshold:
@@ -829,6 +836,19 @@ class HuddleCluster:
         self._canary_probes_total:   int                       = 0
         self._canary_probes_failed:  int                       = 0
         self._canary_last_probe_ms:  float                     = 0.0
+
+        # v4.19.0: adaptive request hedging & speculative execution
+        self._hedging_enabled:          bool                                = hedging_enabled
+        self._hedging_delay_percentile: float                               = hedging_delay_percentile
+        self._hedging_delay_floor_ms:   float                               = max(1.0, hedging_delay_floor_ms)
+        self._hedging_budget_ratio:     float                               = max(0.01, min(1.0, hedging_budget_ratio))
+        self._hedging_max_workers:      int                                 = max(1, hedging_max_workers)
+        self._hedging_executor:         Optional[concurrent.futures.ThreadPoolExecutor] = None
+        self._hedging_total_requests:   int                                 = 0
+        self._hedging_hedged_requests:  int                                 = 0
+        self._hedging_wins:             int                                 = 0
+        self._hedging_throttled:        int                                 = 0
+        self._hedging_latency_saved_ms: float                               = 0.0
 
         # v1.4.0: Admin REST API
         self._admin_port:   Optional[int]                      = None
@@ -2000,6 +2020,9 @@ class HuddleCluster:
             self._health_check_thread.join(timeout=timeout)
         if self._canary_probe_thread and self._canary_probe_thread.is_alive():
             self._canary_probe_thread.join(timeout=timeout)
+        if self._hedging_executor:
+            self._hedging_executor.shutdown(wait=False, cancel_futures=True)
+            self._hedging_executor = None
         if self._gossip_agent:
             self._gossip_agent.stop()
         log.info("HuddleCluster stopped")
@@ -2317,6 +2340,193 @@ class HuddleCluster:
             "last_probe_ms": round(self._canary_last_probe_ms, 2),
             "outer_servers_monitored": len(self._outer_ring),
         }
+
+    def _ensure_hedging_executor(self) -> concurrent.futures.ThreadPoolExecutor:
+        """Ensure the thread pool executor for hedging exists and is active."""
+        with self._lock:
+            if self._hedging_executor is None:
+                self._hedging_executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=self._hedging_max_workers,
+                    thread_name_prefix="HuddleHedge",
+                )
+            return self._hedging_executor
+
+    def hedged_request(
+        self,
+        fn: Callable[[Server], Any],
+        timeout_ms: Optional[float] = None,
+        hedging_delay_ms: Optional[float] = None,
+        allow_hedging: bool = True,
+        affinity_key: Optional[str] = None,
+    ) -> Any:
+        """
+        Execute request with Adaptive Request Hedging & Speculative Execution (v4.19.0).
+
+        Google 'Tail at Scale' pattern: Dispatches request to the primary inner server.
+        If primary does not return within hedging_delay_ms (computed dynamically from
+        cluster P95 if None), dispatches a speculative backup request to the coolest
+        available server. Returns whichever result finishes first.
+
+        A budget ratio safeguard ensures speculative backups never exceed
+        hedging_budget_ratio (default 5%) of total request traffic.
+
+        Args:
+            fn: Callable receiving Server instance and returning result.
+            timeout_ms: Hard deadline for the entire operation in ms.
+            hedging_delay_ms: Override delay before speculative backup. If None,
+                computed dynamically from cluster P95 latency.
+            allow_hedging: Set to False for non-idempotent operations (e.g. POST/writes).
+            affinity_key: Optional sticky-session routing key.
+
+        Returns:
+            Result returned by fn.
+        """
+        with self._lock:
+            self._hedging_total_requests += 1
+
+        primary = self.get_server(affinity_key=affinity_key)
+        if primary is None:
+            raise RuntimeError("No available server in cluster to execute request")
+
+        can_hedge = allow_hedging and (self._hedging_enabled or hedging_delay_ms is not None)
+
+        if not can_hedge:
+            t0 = time.perf_counter()
+            try:
+                result = fn(primary)
+                elapsed = (time.perf_counter() - t0) * 1000.0
+                self.record_latency(primary, elapsed)
+                return result
+            except Exception:
+                elapsed = (time.perf_counter() - t0) * 1000.0
+                self.record_latency(primary, elapsed)
+                primary.metrics.error_rate = min(1.0, primary.metrics.error_rate * 0.9 + 0.1)
+                raise
+
+        # Determine hedging delay
+        if hedging_delay_ms is not None:
+            delay_sec = max(0.001, hedging_delay_ms / 1000.0)
+        else:
+            with self._lock:
+                inner_snap = list(self._inner_ring)
+            p95_candidates = [s.metrics.p95_latency() for s in inner_snap if s.metrics.p95_latency() > 0]
+            if p95_candidates:
+                cluster_p95 = statistics.mean(p95_candidates)
+            elif self._p95_window:
+                cluster_p95 = statistics.median(self._p95_window)
+            else:
+                cluster_p95 = self._hedging_delay_floor_ms
+            effective_delay = max(self._hedging_delay_floor_ms, cluster_p95)
+            delay_sec = effective_delay / 1000.0
+
+        # Check budget ratio
+        with self._lock:
+            ratio = self._hedging_hedged_requests / max(1, self._hedging_total_requests)
+            budget_ok = (self._hedging_total_requests < 10) or (ratio < self._hedging_budget_ratio)
+            if not budget_ok:
+                self._hedging_throttled += 1
+
+        executor = self._ensure_hedging_executor()
+
+        def _execute(server: Server) -> tuple[Any, float, Server]:
+            t0 = time.perf_counter()
+            try:
+                res = fn(server)
+                elapsed = (time.perf_counter() - t0) * 1000.0
+                self.record_latency(server, elapsed)
+                return res, elapsed, server
+            except Exception as exc:
+                elapsed = (time.perf_counter() - t0) * 1000.0
+                self.record_latency(server, elapsed)
+                with self._lock:
+                    server.metrics.error_rate = min(1.0, server.metrics.error_rate * 0.9 + 0.1)
+                raise exc
+
+        f1 = executor.submit(_execute, primary)
+
+        try:
+            # Wait for primary within the hedging delay
+            res, elapsed, _ = f1.result(timeout=delay_sec)
+            return res
+        except concurrent.futures.TimeoutError:
+            # Primary exceeded hedging delay!
+            pass
+        except Exception:
+            # Primary failed outright before delay. If secondary can be dispatched, failover!
+            if not budget_ok:
+                raise
+
+        # Primary did not complete in time (or failed early) - check if we can launch backup
+        secondary = None
+        with self._lock:
+            candidates = [s for s in self._inner_ring if s.id != primary.id]
+            if not candidates:
+                candidates = [s for s in self._outer_ring if s.id != primary.id]
+            if candidates:
+                secondary = min(candidates, key=lambda s: s.temperature)
+
+        if secondary is None or not budget_ok:
+            remain = (timeout_ms / 1000.0 - delay_sec) if timeout_ms else None
+            try:
+                res, _, _ = f1.result(timeout=max(0.001, remain) if remain else None)
+                return res
+            except Exception:
+                raise
+
+        # Launch speculative backup request
+        with self._lock:
+            self._hedging_hedged_requests += 1
+
+        f2 = executor.submit(_execute, secondary)
+
+        done, not_done = concurrent.futures.wait(
+            [f1, f2],
+            timeout=(timeout_ms / 1000.0 - delay_sec) if timeout_ms else None,
+            return_when=concurrent.futures.FIRST_COMPLETED,
+        )
+
+        if not done:
+            raise TimeoutError(f"Hedged request timed out across primary {primary.id} and backup {secondary.id}")
+
+        first_fut = next(iter(done))
+        try:
+            res, elapsed, server = first_fut.result()
+            if server.id == secondary.id:
+                with self._lock:
+                    self._hedging_wins += 1
+            return res
+        except Exception:
+            other_futs = list(not_done)
+            if other_futs:
+                try:
+                    res, elapsed, server = other_futs[0].result(
+                        timeout=(timeout_ms / 1000.0) if timeout_ms else None
+                    )
+                    if server.id == secondary.id:
+                        with self._lock:
+                            self._hedging_wins += 1
+                    return res
+                except Exception:
+                    raise
+            raise
+
+    def hedging_status(self) -> dict:
+        """Return diagnostic metrics for Adaptive Request Hedging."""
+        with self._lock:
+            total = self._hedging_total_requests
+            hedged = self._hedging_hedged_requests
+            ratio = round(hedged / max(1, total), 4)
+            return {
+                "enabled": self._hedging_enabled,
+                "delay_percentile": self._hedging_delay_percentile,
+                "delay_floor_ms": self._hedging_delay_floor_ms,
+                "budget_ratio": self._hedging_budget_ratio,
+                "total_requests": total,
+                "hedged_requests": hedged,
+                "hedged_wins": self._hedging_wins,
+                "hedged_throttled": self._hedging_throttled,
+                "effective_hedging_ratio": ratio,
+            }
 
 
     
@@ -3147,6 +3357,7 @@ src.onerror=()=>{document.getElementById('err').style.display='block'};
                 "servers":        self.health_check_status(),
             },
             "canary_prober":      self.canary_probe_status(),
+            "hedging":            self.hedging_status(),
             "alerts": {
                 "webhooks_configured": len(self._alert_webhooks),
                 "events_monitored":    sorted(self._alert_on),
@@ -3307,6 +3518,24 @@ src.onerror=()=>{document.getElementById('err').style.display='block'};
                 f"huddle_canary_last_probe_ms {self._canary_last_probe_ms:.2f}",
                 "",
             ]
+        lines += [
+            "# HELP huddle_hedging_total_requests Total requests processed via hedging gateway",
+            "# TYPE huddle_hedging_total_requests counter",
+            f"huddle_hedging_total_requests {self._hedging_total_requests}",
+            "",
+            "# HELP huddle_hedging_hedged_requests_total Total speculative backup requests sent",
+            "# TYPE huddle_hedging_hedged_requests_total counter",
+            f"huddle_hedging_hedged_requests_total {self._hedging_hedged_requests}",
+            "",
+            "# HELP huddle_hedging_wins_total Speculative requests that finished faster than primary",
+            "# TYPE huddle_hedging_wins_total counter",
+            f"huddle_hedging_wins_total {self._hedging_wins}",
+            "",
+            "# HELP huddle_hedging_throttled_total Hedging requests suppressed by budget ratio safeguard",
+            "# TYPE huddle_hedging_throttled_total counter",
+            f"huddle_hedging_throttled_total {self._hedging_throttled}",
+            "",
+        ]
         return "\n".join(lines)
 
     def all_servers(self) -> list[Server]:
