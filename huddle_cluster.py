@@ -126,7 +126,7 @@ from enum import Enum
 from typing import Any, Callable, Generator, Optional
 
 #  Version 
-__version__ = "4.19.0"
+__version__ = "4.20.0"
 __author__  = "Rahad Bhuiya"
 __license__ = "MIT"
 
@@ -191,6 +191,19 @@ class ServerMetrics:
         default_factory=lambda: deque(maxlen=1000), repr=False
     )
 
+    # v4.20.0: LLM & AI inference token/streaming metrics
+    total_tokens_processed: int   = 0
+    prompt_tokens:          int   = 0
+    completion_tokens:      int   = 0
+    avg_ttft_ms:            float = 0.0   # Time-To-First-Token rolling average
+    avg_itl_ms:             float = 0.0   # Inter-Token-Latency rolling average
+    _ttft_window: deque = field(
+        default_factory=lambda: deque(maxlen=100), repr=False
+    )
+    _itl_window: deque = field(
+        default_factory=lambda: deque(maxlen=100), repr=False
+    )
+
     def record_latency(self, ms: float) -> None:
         """
         Push one latency sample into both the EMA window and the histogram window.
@@ -205,6 +218,33 @@ class ServerMetrics:
         self._histogram_window.append(ms)
         if self._latency_window:
             self.avg_response_ms = statistics.mean(self._latency_window)
+
+    def record_tokens(self, prompt_tokens: int, completion_tokens: int = 0) -> None:
+        """
+        v4.20.0: Track tokens processed by this server node.
+        """
+        self.prompt_tokens += max(0, prompt_tokens)
+        self.completion_tokens += max(0, completion_tokens)
+        self.total_tokens_processed += max(0, prompt_tokens + completion_tokens)
+
+    def record_streaming_latency(self, ttft_ms: float, itl_ms: Optional[float] = None) -> None:
+        """
+        v4.20.0: Track streaming Time-To-First-Token (TTFT) and Inter-Token-Latency (ITL).
+        """
+        if ttft_ms > 0:
+            self._ttft_window.append(ttft_ms)
+            self.avg_ttft_ms = statistics.mean(self._ttft_window)
+        if itl_ms is not None and itl_ms > 0:
+            self._itl_window.append(itl_ms)
+            self.avg_itl_ms = statistics.mean(self._itl_window)
+
+    def ttft_p95(self) -> float:
+        """95th-percentile TTFT from the recent streaming window."""
+        if not self._ttft_window:
+            return 0.0
+        w = sorted(self._ttft_window)
+        idx = int(0.95 * (len(w) - 1))
+        return w[idx]
 
     def update_latency_anomaly(self, cluster_avg_ms: float) -> None:
         """
@@ -720,6 +760,10 @@ class HuddleCluster:
         hedging_delay_floor_ms:       float           = 25.0,
         hedging_budget_ratio:         float           = 0.05,
         hedging_max_workers:          int             = 16,
+        # v4.20.0 AI/LLM token-aware thermal routing & streaming
+        llm_routing_enabled:          bool            = False,
+        llm_token_cost_multiplier:    float           = 0.0005,
+        llm_ttft_hedging_delay_ms:    Optional[float] = None,
     ):
         #  Validation 
         if cool_threshold >= heat_threshold:
@@ -849,6 +893,13 @@ class HuddleCluster:
         self._hedging_wins:             int                                 = 0
         self._hedging_throttled:        int                                 = 0
         self._hedging_latency_saved_ms: float                               = 0.0
+
+        # v4.20.0: AI/LLM token-aware thermal routing & streaming
+        self._llm_routing_enabled:       bool            = llm_routing_enabled
+        self._llm_token_cost_multiplier: float           = max(0.0, llm_token_cost_multiplier)
+        self._llm_ttft_hedging_delay_ms: Optional[float] = llm_ttft_hedging_delay_ms
+        self._total_tokens_routed:       int             = 0
+        self._total_llm_requests:        int             = 0
 
         # v1.4.0: Admin REST API
         self._admin_port:   Optional[int]                      = None
@@ -1139,6 +1190,52 @@ class HuddleCluster:
             self._p95_window.append(cluster_p95)
             if self._adaptive:
                 self._adaptive.record_p95(cluster_p95)
+
+    def record_tokens(
+        self,
+        server: Server,
+        prompt_tokens: int,
+        completion_tokens: int = 0,
+        apply_thermal_penalty: bool = True,
+    ) -> None:
+        """
+        v4.20.0 — AI & LLM Token Feedback Loop.
+
+        Records prompt and completion token counts for an LLM inference server.
+        If apply_thermal_penalty is True (and llm_routing_enabled), applies a thermal
+        load penalty scaled by llm_token_cost_multiplier, simulating the GPU
+        memory footprint and compute strain of long-context generation.
+        """
+        server.metrics.record_tokens(prompt_tokens, completion_tokens)
+        total_tokens = prompt_tokens + completion_tokens
+
+        with self._lock:
+            self._total_tokens_routed += total_tokens
+            self._total_llm_requests += 1
+
+        if apply_thermal_penalty and self._llm_routing_enabled:
+            # Token cost penalty increases the raw thermal score
+            token_heat = min(0.5, total_tokens * self._llm_token_cost_multiplier)
+            with server._lock:
+                server.temperature = min(1.0, server.temperature + token_heat)
+
+    def record_streaming(
+        self,
+        server: Server,
+        ttft_ms: float,
+        itl_ms: Optional[float] = None,
+        total_latency_ms: Optional[float] = None,
+    ) -> None:
+        """
+        v4.20.0 — AI & LLM Streaming Telemetry (TTFT & ITL).
+
+        Records Time-To-First-Token and Inter-Token-Latency.
+        Also feeds total round-trip latency into the cluster's anomaly detector
+        to trigger thermal eviction if a GPU worker's KV-cache becomes congested.
+        """
+        server.metrics.record_streaming_latency(ttft_ms, itl_ms)
+        effective_latency = total_latency_ms if total_latency_ms is not None else ttft_ms
+        self.record_latency(server, effective_latency)
 
     @contextmanager
     def get_server_context(
@@ -2528,6 +2625,73 @@ class HuddleCluster:
                 "effective_hedging_ratio": ratio,
             }
 
+    def hedged_llm_request(
+        self,
+        fn: Callable[[Server], Any],
+        prompt_tokens: int = 0,
+        estimated_completion_tokens: int = 0,
+        timeout_ms: Optional[float] = None,
+        ttft_hedging_delay_ms: Optional[float] = None,
+        affinity_key: Optional[str] = None,
+    ) -> Any:
+        """
+        v4.20.0 — AI/LLM Token-Aware & TTFT Speculative Execution Gateway.
+
+        Executes an LLM inference call with token accounting and TTFT-hedged failover.
+        Selects primary server, dispatches request, and automatically tracks token consumption.
+        If TTFT delay exceeds cluster TTFT threshold (or ttft_hedging_delay_ms),
+        dispatches speculative request to the coolest resting or inner GPU node.
+        """
+        effective_delay = (
+            ttft_hedging_delay_ms
+            if ttft_hedging_delay_ms is not None
+            else self._llm_ttft_hedging_delay_ms
+        )
+
+        def _wrapped_llm_call(srv: Server) -> Any:
+            res = fn(srv)
+            self.record_tokens(
+                srv,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=estimated_completion_tokens,
+                apply_thermal_penalty=True,
+            )
+            return res
+
+        return self.hedged_request(
+            fn=_wrapped_llm_call,
+            timeout_ms=timeout_ms,
+            hedging_delay_ms=effective_delay,
+            allow_hedging=True,
+            affinity_key=affinity_key,
+        )
+
+    def llm_status(self) -> dict:
+        """Return diagnostic metrics for LLM token routing and streaming."""
+        with self._lock:
+            all_s = self.all_servers()
+            ttft_vals = [s.metrics.avg_ttft_ms for s in all_s if s.metrics.avg_ttft_ms > 0]
+            itl_vals = [s.metrics.avg_itl_ms for s in all_s if s.metrics.avg_itl_ms > 0]
+            return {
+                "enabled": self._llm_routing_enabled,
+                "token_cost_multiplier": self._llm_token_cost_multiplier,
+                "total_tokens_routed": self._total_tokens_routed,
+                "total_llm_requests": self._total_llm_requests,
+                "avg_cluster_ttft_ms": round(statistics.mean(ttft_vals), 2) if ttft_vals else 0.0,
+                "avg_cluster_itl_ms": round(statistics.mean(itl_vals), 2) if itl_vals else 0.0,
+                "server_token_stats": {
+                    s.id: {
+                        "total_tokens": s.metrics.total_tokens_processed,
+                        "prompt_tokens": s.metrics.prompt_tokens,
+                        "completion_tokens": s.metrics.completion_tokens,
+                        "avg_ttft_ms": round(s.metrics.avg_ttft_ms, 2),
+                        "ttft_p95_ms": round(s.metrics.ttft_p95(), 2),
+                        "avg_itl_ms": round(s.metrics.avg_itl_ms, 2),
+                    }
+                    for s in all_s
+                },
+            }
+
 
     
     # Admin REST API
@@ -3358,6 +3522,7 @@ src.onerror=()=>{document.getElementById('err').style.display='block'};
             },
             "canary_prober":      self.canary_probe_status(),
             "hedging":            self.hedging_status(),
+            "llm":                self.llm_status(),
             "alerts": {
                 "webhooks_configured": len(self._alert_webhooks),
                 "events_monitored":    sorted(self._alert_on),
@@ -3535,7 +3700,26 @@ src.onerror=()=>{document.getElementById('err').style.display='block'};
             "# TYPE huddle_hedging_throttled_total counter",
             f"huddle_hedging_throttled_total {self._hedging_throttled}",
             "",
+            "# HELP huddle_llm_total_tokens_routed Total prompt and completion tokens routed",
+            "# TYPE huddle_llm_total_tokens_routed counter",
+            f"huddle_llm_total_tokens_routed {self._total_tokens_routed}",
+            "",
+            "# HELP huddle_llm_total_requests Total LLM inference requests handled",
+            "# TYPE huddle_llm_total_requests counter",
+            f"huddle_llm_total_requests {self._total_llm_requests}",
+            "",
         ]
+        for s in self.all_servers():
+            lines.append(
+                f'huddle_server_ttft_avg_ms{{server="{s.id}"}} {s.metrics.avg_ttft_ms:.2f}'
+            )
+            lines.append(
+                f'huddle_server_ttft_p95_ms{{server="{s.id}"}} {s.metrics.ttft_p95():.2f}'
+            )
+            lines.append(
+                f'huddle_server_itl_avg_ms{{server="{s.id}"}} {s.metrics.avg_itl_ms:.2f}'
+            )
+        lines.append("")
         return "\n".join(lines)
 
     def all_servers(self) -> list[Server]:

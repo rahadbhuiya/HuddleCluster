@@ -189,6 +189,7 @@ Under server failure, P95 latency stays under **86 ms** where NGINX round-robin 
 - Cluster Webhooks with HMAC-SHA256 event dispatch and retry queue — v4.17
 - Proactive synthetic canary prober with autonomous outer-ring cooldown promotion — v4.18
 - Adaptive request hedging & speculative execution (Tail at Scale) with budget ratio safeguard — v4.19
+- AI / LLM token-aware thermal routing & TTFT streaming latency gateway — v4.20
 
 ---
 

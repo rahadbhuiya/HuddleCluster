@@ -6,6 +6,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 
 
+## [4.20.0] - 2026-09-17
+
+### Added — AI / LLM Token-Aware Thermal Routing & Streaming TTFT Gateway
+
+**The gap:** Standard load balancers and proxy gateways treat LLM and AI inference requests as homogeneous HTTP requests. However, in transformer-based inference (vLLM, Ollama, TensorRT-LLM), request cost varies radically based on prompt token count and generated completion tokens. An 8k-token context request induces 50x more GPU memory allocation (KV-cache) and thermal stress than a 100-token prompt. Furthermore, during traffic spikes, queuing at congested GPU workers spikes Time-To-First-Token (TTFT) and Inter-Token-Latency (ITL) without necessarily triggering traditional HTTP timeouts.
+
+**What was added:**
+- **Token-Aware Thermal Accounting (`record_tokens`):** Tracks prompt and completion tokens processed per backend GPU worker. Applies a scaled thermal load penalty (`llm_token_cost_multiplier`, default `0.0005`), causing heavily loaded long-context nodes to warm up and self-evict to the outer ring so cooled nodes absorb new generations.
+- **Streaming TTFT & ITL Telemetry (`record_streaming`):** Tracks rolling Time-To-First-Token and Inter-Token-Latency metrics on `ServerMetrics` with `avg_ttft_ms`, `ttft_p95()`, and `avg_itl_ms`.
+- **Hedged LLM Gateway (`hedged_llm_request`):** Dispatches LLM inference calls with automated token accounting and speculative failover. If a primary worker's TTFT exceeds the cluster TTFT delay floor, speculative execution dispatches to the coolest resting or inner GPU worker.
+- **Telemetry & Diagnostics:** Added `llm_status()` in `health_report()["llm"]` detailing cluster TTFT/ITL averages and per-node token counters. Added Prometheus metrics:
+  - `huddle_llm_total_tokens_routed`: Total prompt and completion tokens processed.
+  - `huddle_llm_total_requests`: Total LLM inference invocations.
+  - `huddle_server_ttft_avg_ms`, `huddle_server_ttft_p95_ms`, `huddle_server_itl_avg_ms` per-server gauges.
+- **Comprehensive Test Suite:** Added `tests/test_llm_routing.py` verifying token thermal penalties, streaming TTFT/ITL recording, speculative TTFT execution, and telemetry exposition.
+
+---
+
 ## [4.19.0] - 2026-09-15
 
 ### Added — Adaptive Request Hedging & Speculative Execution (Google "Tail at Scale")
