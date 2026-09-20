@@ -126,7 +126,7 @@ from enum import Enum
 from typing import Any, Callable, Generator, Optional
 
 #  Version 
-__version__ = "4.20.0"
+__version__ = "4.21.0"
 __author__  = "Rahad Bhuiya"
 __license__ = "MIT"
 
@@ -764,6 +764,9 @@ class HuddleCluster:
         llm_routing_enabled:          bool            = False,
         llm_token_cost_multiplier:    float           = 0.0005,
         llm_ttft_hedging_delay_ms:    Optional[float] = None,
+        # v4.21.0 Linux eBPF/XDP zero-copy data plane
+        ebpf_enabled:                 bool            = False,
+        ebpf_interface:               str             = "eth0",
     ):
         #  Validation 
         if cool_threshold >= heat_threshold:
@@ -900,6 +903,17 @@ class HuddleCluster:
         self._llm_ttft_hedging_delay_ms: Optional[float] = llm_ttft_hedging_delay_ms
         self._total_tokens_routed:       int             = 0
         self._total_llm_requests:        int             = 0
+
+        # v4.21.0: Linux eBPF/XDP zero-copy data plane
+        self._ebpf_enabled:              bool            = ebpf_enabled
+        self._ebpf_interface:            str             = ebpf_interface
+        self._ebpf_dataplane:            Optional[Any]   = None
+        if ebpf_enabled:
+            try:
+                from huddle_cluster_pkg.ebpf_controller import EBPFDataPlane
+                self._ebpf_dataplane = EBPFDataPlane(interface=ebpf_interface, enabled=True)
+            except Exception as _ebpf_exc:
+                log.warning(f"Could not initialize eBPF data plane: {_ebpf_exc}")
 
         # v1.4.0: Admin REST API
         self._admin_port:   Optional[int]                      = None
@@ -1857,6 +1871,12 @@ class HuddleCluster:
                     },
                 )
 
+            if rotated and self._ebpf_dataplane:
+                try:
+                    self._ebpf_dataplane.sync_inner_ring(list(self._inner_ring))
+                except Exception as _sync_exc:
+                    log.debug(f"eBPF map sync failed: {_sync_exc}")
+
             return rotated
 
     #  Internal Move Helpers 
@@ -2692,6 +2712,26 @@ class HuddleCluster:
                 },
             }
 
+    def sync_ebpf(self) -> int:
+        """Manually trigger synchronization of active inner servers to Linux eBPF data plane."""
+        if self._ebpf_dataplane:
+            with self._lock:
+                return self._ebpf_dataplane.sync_inner_ring(list(self._inner_ring))
+        return 0
+
+    def ebpf_status(self) -> dict:
+        """Return diagnostic metrics for Linux eBPF/XDP zero-copy data plane."""
+        if self._ebpf_dataplane:
+            return self._ebpf_dataplane.telemetry_status()
+        return {
+            "ebpf_kernel_mode": False,
+            "supported_os": False,
+            "interface": self._ebpf_interface,
+            "active_server_count": 0,
+            "total_packets_forwarded": 0,
+            "active_table": [],
+        }
+
 
     
     # Admin REST API
@@ -3523,6 +3563,7 @@ src.onerror=()=>{document.getElementById('err').style.display='block'};
             "canary_prober":      self.canary_probe_status(),
             "hedging":            self.hedging_status(),
             "llm":                self.llm_status(),
+            "ebpf":               self.ebpf_status(),
             "alerts": {
                 "webhooks_configured": len(self._alert_webhooks),
                 "events_monitored":    sorted(self._alert_on),
@@ -3720,6 +3761,18 @@ src.onerror=()=>{document.getElementById('err').style.display='block'};
                 f'huddle_server_itl_avg_ms{{server="{s.id}"}} {s.metrics.avg_itl_ms:.2f}'
             )
         lines.append("")
+        if self._ebpf_dataplane:
+            ebpf_stats = self._ebpf_dataplane.telemetry_status()
+            lines += [
+                "# HELP huddle_ebpf_active_servers Active backend servers programmed in Linux eBPF map",
+                "# TYPE huddle_ebpf_active_servers gauge",
+                f"huddle_ebpf_active_servers {ebpf_stats['active_server_count']}",
+                "",
+                "# HELP huddle_ebpf_packets_forwarded_total Total packets forwarded by eBPF data plane",
+                "# TYPE huddle_ebpf_packets_forwarded_total counter",
+                f"huddle_ebpf_packets_forwarded_total {ebpf_stats['total_packets_forwarded']}",
+                "",
+            ]
         return "\n".join(lines)
 
     def all_servers(self) -> list[Server]:

@@ -6,6 +6,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 
 
+## [4.21.0] - 2026-09-20
+
+### Added — Linux Kernel eBPF / XDP Zero-Copy High-Performance Data Plane
+
+**The gap:** Traditional Layer 7 proxy routing (even in optimized async frameworks) incurs CPU context-switching and kernel-to-userspace memory copying for every incoming packet. At extreme line rates (1M+ packets per second), userspace buffer allocation and kernel socket queuing become the fundamental throughput bottleneck.
+
+**What was added:**
+- **Linux Kernel eBPF XDP Router (`huddle_cluster_pkg/ebpf/huddle_xdp.bpf.c`):** Pure C eBPF program attached at the eXpress Data Path (XDP) network interface hook. Inspects Ethernet/IPv4/TCP headers, performs client flow hashing, and rewrites destination IP/port to active backend nodes with zero memory copying (`XDP_TX`).
+- **BPF Map Synchronization (`EBPFDataPlane`):** Python control-plane bridge in `huddle_cluster_pkg/ebpf_controller.py`. Automatically synchronizes HuddleCluster inner-ring active nodes and fixed-point thermal scores directly into the kernel's `inner_servers_map`.
+- **Automatic Ring-Rotation Map Sync:** `HuddleCluster.rotate()` automatically updates the kernel BPF map whenever servers move between inner and outer rings.
+- **Resilient Multi-Platform Emulation:** Gracefully falls back to userspace proxy and diagnostic tracking on non-Linux operating systems or environments without BPF privileges.
+- **Telemetry & Prometheus Exposition:** Added `ebpf_status()` in `health_report()["ebpf"]` and Prometheus metrics:
+  - `huddle_ebpf_active_servers`: Number of active backends programmed in kernel map.
+  - `huddle_ebpf_packets_forwarded_total`: Wire-speed packet forwarding counter.
+- **Dedicated Test Suite:** Added `tests/test_ebpf_controller.py` verifying map serialization, rotation synchronization, telemetry counters, and fallback handling.
+
+---
+
 ## [4.20.0] - 2026-09-17
 
 ### Added — AI / LLM Token-Aware Thermal Routing & Streaming TTFT Gateway

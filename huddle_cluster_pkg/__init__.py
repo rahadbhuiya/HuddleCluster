@@ -66,8 +66,9 @@ from huddle_cluster_pkg.cluster_rate_limiter        import ClusterRateLimiter
 from huddle_cluster_pkg.cluster_canary_deployment   import ClusterCanaryDeployment
 from huddle_cluster_pkg.cluster_observability       import ClusterObservability
 from huddle_cluster_pkg.cluster_webhooks            import ClusterWebhooks
+from huddle_cluster_pkg.ebpf_controller             import EBPFDataPlane
 
-__version__ = "4.20.0"
+__version__ = "4.21.0"
 
 __all__ = [
     "__version__",
@@ -77,4 +78,5 @@ __all__ = [
     "MultiRegionManager", "ClusterCircuitBreaker",
     "ClusterRateLimiter", "ClusterCanaryDeployment",
     "ClusterObservability", "ClusterWebhooks",
+    "EBPFDataPlane",
 ]
