@@ -126,7 +126,7 @@ from enum import Enum
 from typing import Any, Callable, Generator, Optional
 
 #  Version 
-__version__ = "4.21.0"
+__version__ = "4.22.0"
 __author__  = "Rahad Bhuiya"
 __license__ = "MIT"
 
@@ -767,6 +767,11 @@ class HuddleCluster:
         # v4.21.0 Linux eBPF/XDP zero-copy data plane
         ebpf_enabled:                 bool            = False,
         ebpf_interface:               str             = "eth0",
+        # v4.22.0 Autonomous Thermal Auto-Remediation & Self-Healing
+        auto_remediation_enabled:     bool            = False,
+        remediation_policies:         Optional[list]  = None,
+        remediation_max_retries_per_hour: int         = 3,
+        remediation_drain_period_s:   float           = 3.0,
     ):
         #  Validation 
         if cool_threshold >= heat_threshold:
@@ -914,6 +919,21 @@ class HuddleCluster:
                 self._ebpf_dataplane = EBPFDataPlane(interface=ebpf_interface, enabled=True)
             except Exception as _ebpf_exc:
                 log.warning(f"Could not initialize eBPF data plane: {_ebpf_exc}")
+
+        # v4.22.0: Autonomous Thermal Auto-Remediation & Self-Healing
+        self._auto_remediation_enabled: bool = auto_remediation_enabled
+        self._remediator: Optional[Any] = None
+        if auto_remediation_enabled or remediation_policies:
+            try:
+                from huddle_cluster_pkg.cluster_remediator import ClusterRemediator
+                self._remediator = ClusterRemediator(
+                    policies=remediation_policies or [],
+                    enabled=auto_remediation_enabled,
+                    max_retries_per_hour=remediation_max_retries_per_hour,
+                    default_drain_period_s=remediation_drain_period_s,
+                )
+            except Exception as _rem_exc:
+                log.warning(f"Could not initialize ClusterRemediator: {_rem_exc}")
 
         # v1.4.0: Admin REST API
         self._admin_port:   Optional[int]                      = None
@@ -1835,6 +1855,10 @@ class HuddleCluster:
                 if dwell_time < self.min_outer_dwell_sec:
                     break
 
+                # v4.22.0: Quarantine / Healing gate
+                if self._remediator and self._remediator.is_quarantined(coolest.id):
+                    break
+
                 if coolest.is_cooled(self.cool_threshold):
                     heapq.heappop(self._outer_ring)
                     self._move_to_inner(coolest)
@@ -1857,6 +1881,25 @@ class HuddleCluster:
                 if unhealthy or circuit_open:
                     self._move_to_outer(server, EvictionReason.HEALTH_FAIL)
                     rotated = True
+                    if self._remediator and circuit_open:
+                        try:
+                            pol = self._remediator.record_circuit_breaker_open(server.id)
+                            if pol:
+                                self._remediator.trigger_remediation(
+                                    server.id, pol, {"reason": "circuit_breaker_open", "error_rate": server.metrics.error_rate}
+                                )
+                        except Exception as _cb_exc:
+                            log.debug(f"Circuit breaker remediation error: {_cb_exc}")
+
+            # Step 4 (v4.22.0): Check stale servers stuck in cooling ring
+            if self._remediator:
+                try:
+                    for s_id, pol in self._remediator.check_stale_cooling_ring():
+                        self._remediator.trigger_remediation(
+                            s_id, pol, {"reason": "stale_outer_ring", "timestamp": time.time()}
+                        )
+                except Exception as _stale_exc:
+                    log.debug(f"Stale remediation check error: {_stale_exc}")
 
             # Degraded cluster alert: inner ring below minimum size
             if len(self._inner_ring) < self.min_inner_size:
@@ -1968,6 +2011,23 @@ class HuddleCluster:
             },
         )
 
+        # v4.22.0: Autonomous Thermal Auto-Remediation on eviction
+        if self._remediator:
+            try:
+                matched_pol = self._remediator.record_eviction(server.id, server.temperature)
+                if matched_pol:
+                    self._remediator.trigger_remediation(
+                        server.id,
+                        matched_pol,
+                        {
+                            "reason": reason.value,
+                            "temperature": server.temperature,
+                            "consecutive_evictions": server._consecutive_evictions,
+                        },
+                    )
+            except Exception as _rem_exc:
+                log.debug(f"Auto-remediation eviction trigger error: {_rem_exc}")
+
     def _move_to_inner(self, server: Server) -> None:
         now     = time.monotonic()
         elapsed = now - server.last_rotated
@@ -1975,7 +2035,14 @@ class HuddleCluster:
         server.position                      = Position.INNER
         server.last_rotated                  = now
         server.rotation_count               += 1
-        server._consecutive_evictions        = 0
+        # v4.22.0: Reset remediation counters upon genuine thermal recovery
+        if server.temperature <= self.cool_threshold:
+            server._consecutive_evictions = 0
+            if self._remediator:
+                try:
+                    self._remediator.record_recovery(server.id)
+                except Exception:
+                    pass
 
         self._inner_ring.append(server)
 
@@ -2731,6 +2798,51 @@ class HuddleCluster:
             "total_packets_forwarded": 0,
             "active_table": [],
         }
+
+    # v4.22.0: Autonomous Thermal Auto-Remediation & Self-Healing
+    def remediation_status(self) -> dict:
+        """Return diagnostic metrics for autonomous auto-remediation and self-healing."""
+        if self._remediator:
+            return self._remediator.telemetry_status()
+        return {
+            "enabled": False,
+            "active_policies": 0,
+            "total_actions": 0,
+            "successful_actions": 0,
+            "failed_actions": 0,
+            "throttled_actions": 0,
+            "quarantined_count": 0,
+            "quarantined_servers": [],
+            "server_states": {},
+            "recent_history": [],
+        }
+
+    def trigger_manual_remediation(self, server_id: str, reason: str = "manual") -> bool:
+        """Manually trigger self-healing workflow on a designated server."""
+        if not self._remediator:
+            return False
+        from huddle_cluster_pkg.cluster_remediator import RemediationActionType, RemediationPolicy, RemediationTrigger
+        with self._lock:
+            # Match first available policy or default callback
+            pol = None
+            for p in self._remediator.policies:
+                if p.enabled:
+                    pol = p
+                    break
+            if not pol:
+                pol = RemediationPolicy(
+                    name="default_manual_policy",
+                    trigger=RemediationTrigger.MANUAL,
+                    action_type=RemediationActionType.PYTHON_CALLBACK,
+                    action_callback=lambda s, d: True,
+                )
+            return self._remediator.trigger_remediation(server_id, pol, {"reason": reason, "manual": True})
+
+    def clear_remediation_quarantine(self, server_id: str) -> bool:
+        """Clear quarantine on a server and restore it to HEALTHY."""
+        if self._remediator:
+            return self._remediator.clear_quarantine(server_id)
+        return False
 
 
     
@@ -3564,6 +3676,7 @@ src.onerror=()=>{document.getElementById('err').style.display='block'};
             "hedging":            self.hedging_status(),
             "llm":                self.llm_status(),
             "ebpf":               self.ebpf_status(),
+            "remediation":        self.remediation_status(),
             "alerts": {
                 "webhooks_configured": len(self._alert_webhooks),
                 "events_monitored":    sorted(self._alert_on),
@@ -3771,6 +3884,26 @@ src.onerror=()=>{document.getElementById('err').style.display='block'};
                 "# HELP huddle_ebpf_packets_forwarded_total Total packets forwarded by eBPF data plane",
                 "# TYPE huddle_ebpf_packets_forwarded_total counter",
                 f"huddle_ebpf_packets_forwarded_total {ebpf_stats['total_packets_forwarded']}",
+                "",
+            ]
+        if self._remediator:
+            rem_stats = self._remediator.telemetry_status()
+            lines += [
+                "# HELP huddle_remediation_actions_total Total self-healing remediation actions triggered",
+                "# TYPE huddle_remediation_actions_total counter",
+                f"huddle_remediation_actions_total {rem_stats['total_actions']}",
+                "",
+                "# HELP huddle_remediation_success_total Successful self-healing remediation actions",
+                "# TYPE huddle_remediation_success_total counter",
+                f"huddle_remediation_success_total {rem_stats['successful_actions']}",
+                "",
+                "# HELP huddle_remediation_failures_total Failed self-healing remediation actions",
+                "# TYPE huddle_remediation_failures_total counter",
+                f"huddle_remediation_failures_total {rem_stats['failed_actions']}",
+                "",
+                "# HELP huddle_remediation_quarantined_servers Active servers currently in quarantine",
+                "# TYPE huddle_remediation_quarantined_servers gauge",
+                f"huddle_remediation_quarantined_servers {rem_stats['quarantined_count']}",
                 "",
             ]
         return "\n".join(lines)

@@ -191,6 +191,7 @@ Under server failure, P95 latency stays under **86 ms** where NGINX round-robin 
 - Adaptive request hedging & speculative execution (Tail at Scale) with budget ratio safeguard — v4.19
 - AI / LLM token-aware thermal routing & TTFT streaming latency gateway — v4.20
 - Linux Kernel eBPF / XDP zero-copy high-performance data plane — v4.21
+- Autonomous thermal auto-remediation & self-healing closed-loop engine — v4.22
 
 ---
 

@@ -6,6 +6,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 
 
+## [4.22.0] - 2026-09-20
+
+### Added — Autonomous Thermal Auto-Remediation & Self-Healing Engine
+
+**The gap:** Traditional load balancers and orchestrators rely on alerts (webhooks, email, PagerDuty) when a backend server degrades, overheats, or trips its circuit breaker. While alerts notify operators, recovering stuck or repeatedly failing nodes still requires human intervention or detached external cron jobs. Nodes often remain stuck in the outer cooling ring without recovering their health state.
+
+**What was added:**
+- **Autonomous Remediation Engine (`ClusterRemediator`):** Implemented in `huddle_cluster_pkg/cluster_remediator.py`. Executes closed-loop automated self-healing actions based on declarative triggers (`CONSECUTIVE_OVERHEAT`, `CIRCUIT_BREAKER_OPEN`, `STALE_OUTER_RING`, `CANARY_FAILED`).
+- **Flexible Action Recipes (`RemediationPolicy`):** Supports administrative shell scripts/commands (`LOCAL_COMMAND` like `docker restart` or `systemctl restart`), cloud/Kubernetes webhooks (`HTTP_WEBHOOK`), and custom programmatic in-process handlers (`PYTHON_CALLBACK`).
+- **Quarantine & Traffic Drain Safeguards:** Unhealthy nodes transition into `QUARANTINED` state and are blocked from re-entering the active inner ring during rotation until verified or cleared.
+- **Hourly Rate Limiter & Dead-Letter Escalation:** Protects clusters from reboot loops and cascading restart storms by enforcing hourly retry limits (`max_retries_per_hour`). Excessive failures transition nodes to `DEAD_LETTER` state.
+- **Core Engine Integration:** Connected `HuddleCluster.rotate()`, `_move_to_inner()`, and `_complete_eviction()` with automated policy matching.
+- **Diagnostics & Prometheus Exposition:** Added `remediation_status()` to `health_report()["remediation"]` and Prometheus counters/gauges (`huddle_remediation_actions_total`, `huddle_remediation_success_total`, `huddle_remediation_failures_total`, `huddle_remediation_quarantined_servers`).
+- **Dedicated Test Suite:** Added `tests/test_auto_remediation.py` testing consecutive evictions, circuit-breaker healing, quarantine gates, rate limiting, and metrics.
+
+---
+
 ## [4.21.0] - 2026-09-20
 
 ### Added — Linux Kernel eBPF / XDP Zero-Copy High-Performance Data Plane

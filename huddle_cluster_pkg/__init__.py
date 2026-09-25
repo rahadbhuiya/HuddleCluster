@@ -67,8 +67,15 @@ from huddle_cluster_pkg.cluster_canary_deployment   import ClusterCanaryDeployme
 from huddle_cluster_pkg.cluster_observability       import ClusterObservability
 from huddle_cluster_pkg.cluster_webhooks            import ClusterWebhooks
 from huddle_cluster_pkg.ebpf_controller             import EBPFDataPlane
+from huddle_cluster_pkg.cluster_remediator          import (
+    ClusterRemediator,
+    RemediationPolicy,
+    RemediationActionType,
+    RemediationTrigger,
+    RemediationState,
+)
 
-__version__ = "4.21.0"
+__version__ = "4.22.0"
 
 __all__ = [
     "__version__",
@@ -79,4 +86,7 @@ __all__ = [
     "ClusterRateLimiter", "ClusterCanaryDeployment",
     "ClusterObservability", "ClusterWebhooks",
     "EBPFDataPlane",
+    "ClusterRemediator", "RemediationPolicy",
+    "RemediationActionType", "RemediationTrigger",
+    "RemediationState",
 ]
