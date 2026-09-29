@@ -74,8 +74,13 @@ from huddle_cluster_pkg.cluster_remediator          import (
     RemediationTrigger,
     RemediationState,
 )
+from huddle_cluster_pkg.hardware_sensors            import (
+    HardwareTelemetryManager,
+    HardwareSensorReader,
+    HardwareTelemetry,
+)
 
-__version__ = "4.22.0"
+__version__ = "4.23.0"
 
 __all__ = [
     "__version__",
@@ -89,4 +94,6 @@ __all__ = [
     "ClusterRemediator", "RemediationPolicy",
     "RemediationActionType", "RemediationTrigger",
     "RemediationState",
+    "HardwareTelemetryManager", "HardwareSensorReader",
+    "HardwareTelemetry",
 ]

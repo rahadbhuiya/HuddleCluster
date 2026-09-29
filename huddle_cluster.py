@@ -126,7 +126,7 @@ from enum import Enum
 from typing import Any, Callable, Generator, Optional
 
 #  Version 
-__version__ = "4.22.0"
+__version__ = "4.23.0"
 __author__  = "Rahad Bhuiya"
 __license__ = "MIT"
 
@@ -772,6 +772,11 @@ class HuddleCluster:
         remediation_policies:         Optional[list]  = None,
         remediation_max_retries_per_hour: int         = 3,
         remediation_drain_period_s:   float           = 3.0,
+        # v4.23.0 Real-time Hardware Sensor Integration (CPU/GPU NVML)
+        hardware_sensors_enabled:     bool            = False,
+        hardware_sensor_weight:       float           = 0.35,
+        hardware_cpu_throttle_c:      float           = 85.0,
+        hardware_gpu_throttle_c:      float           = 82.0,
     ):
         #  Validation 
         if cool_threshold >= heat_threshold:
@@ -934,6 +939,22 @@ class HuddleCluster:
                 )
             except Exception as _rem_exc:
                 log.warning(f"Could not initialize ClusterRemediator: {_rem_exc}")
+
+        # v4.23.0: Real-time Hardware Sensor Integration (CPU/GPU NVML)
+        self._hardware_sensors_enabled: bool = hardware_sensors_enabled
+        self._hardware_sensor_weight: float = max(0.0, min(1.0, hardware_sensor_weight))
+        self._hardware_manager: Optional[Any] = None
+        if hardware_sensors_enabled:
+            try:
+                from huddle_cluster_pkg.hardware_sensors import HardwareTelemetryManager
+                self._hardware_manager = HardwareTelemetryManager(
+                    enabled=True,
+                    sensor_weight=self._hardware_sensor_weight,
+                    cpu_throttle_c=hardware_cpu_throttle_c,
+                    gpu_throttle_c=hardware_gpu_throttle_c,
+                )
+            except Exception as _hw_exc:
+                log.warning(f"Could not initialize HardwareTelemetryManager: {_hw_exc}")
 
         # v1.4.0: Admin REST API
         self._admin_port:   Optional[int]                      = None
@@ -1812,6 +1833,11 @@ class HuddleCluster:
         with self._lock:
             rotated = False
             now     = time.monotonic()
+
+            # v4.23.0: Hardware thermal fusion
+            if self._hardware_manager and self._hardware_manager.enabled:
+                for s in list(self._inner_ring) + list(self._outer_ring):
+                    s.temperature = self._hardware_manager.fuse_temperature(s.id, s.temperature)
 
             # Step 1: Evict overheated OR floor-breaching inner servers
             candidates = []
@@ -2844,6 +2870,51 @@ class HuddleCluster:
             return self._remediator.clear_quarantine(server_id)
         return False
 
+    # v4.23.0: Real-Time Hardware Sensor Integration (CPU/GPU NVML)
+    def record_hardware_telemetry(
+        self,
+        server_id: str,
+        cpu_temp_c: float,
+        cpu_util_pct: float = 0.0,
+        gpu_temp_c: Optional[float] = None,
+        gpu_util_pct: Optional[float] = None,
+        vram_used_mb: Optional[float] = None,
+        vram_total_mb: Optional[float] = None,
+        vram_usage_ratio: Optional[float] = None,
+        power_draw_w: Optional[float] = None,
+    ) -> None:
+        """Ingest real-time physical silicon telemetry for a server and update fused temperature."""
+        if not self._hardware_manager:
+            return
+        self._hardware_manager.record_telemetry(
+            server_id=server_id,
+            cpu_temp_c=cpu_temp_c,
+            cpu_util_pct=cpu_util_pct,
+            gpu_temp_c=gpu_temp_c,
+            gpu_util_pct=gpu_util_pct,
+            vram_used_mb=vram_used_mb,
+            vram_total_mb=vram_total_mb,
+            vram_usage_ratio=vram_usage_ratio,
+            power_draw_w=power_draw_w,
+        )
+        with self._lock:
+            for s in self.all_servers():
+                if s.id == server_id:
+                    s.temperature = self._hardware_manager.fuse_temperature(s.id, s.temperature)
+                    break
+
+    def hardware_status(self) -> dict:
+        """Return diagnostic metrics for hardware silicon sensors."""
+        if self._hardware_manager:
+            return self._hardware_manager.telemetry_status()
+        return {
+            "enabled": False,
+            "sensor_weight": getattr(self, "_hardware_sensor_weight", 0.0),
+            "total_telemetry_updates": 0,
+            "monitored_servers_count": 0,
+            "servers": {},
+        }
+
 
     
     # Admin REST API
@@ -3677,6 +3748,7 @@ src.onerror=()=>{document.getElementById('err').style.display='block'};
             "llm":                self.llm_status(),
             "ebpf":               self.ebpf_status(),
             "remediation":        self.remediation_status(),
+            "hardware_sensors":   self.hardware_status(),
             "alerts": {
                 "webhooks_configured": len(self._alert_webhooks),
                 "events_monitored":    sorted(self._alert_on),
@@ -3906,6 +3978,20 @@ src.onerror=()=>{document.getElementById('err').style.display='block'};
                 f"huddle_remediation_quarantined_servers {rem_stats['quarantined_count']}",
                 "",
             ]
+        if self._hardware_manager:
+            hw_stats = self._hardware_manager.telemetry_status()
+            lines += [
+                "# HELP huddle_hardware_telemetry_updates_total Total hardware silicon sensor readings ingested",
+                "# TYPE huddle_hardware_telemetry_updates_total counter",
+                f"huddle_hardware_telemetry_updates_total {hw_stats['total_telemetry_updates']}",
+                "",
+            ]
+            for s_id, s_data in hw_stats["servers"].items():
+                lines.append(f'huddle_server_cpu_temp_celsius{{server="{s_id}"}} {s_data["cpu_temp_c"]:.1f}')
+                if s_data["gpu_temp_c"] is not None:
+                    lines.append(f'huddle_server_gpu_temp_celsius{{server="{s_id}"}} {s_data["gpu_temp_c"]:.1f}')
+                lines.append(f'huddle_server_hardware_stress{{server="{s_id}"}} {s_data["thermal_stress"]:.4f}')
+            lines.append("")
         return "\n".join(lines)
 
     def all_servers(self) -> list[Server]:
