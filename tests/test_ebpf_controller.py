@@ -25,6 +25,7 @@ class TestEBPFDataPlane(unittest.TestCase):
         self.s1.weight = 1.0
         self.s2.weight = 2.0
 
+
     def test_ip_to_int_conversion(self):
         """Converts dotted IPv4 strings to 32-bit big-endian integer."""
         val = self.dataplane.ip_to_int("192.168.1.10")
@@ -32,6 +33,7 @@ class TestEBPFDataPlane(unittest.TestCase):
         self.assertGreater(val, 0)
         # Invalid IP returns 0
         self.assertEqual(self.dataplane.ip_to_int("invalid_ip"), 0)
+
 
     def test_sync_inner_ring_populates_map(self):
         """Synchronizes inner servers list into virtual/kernel BPF map."""
@@ -43,12 +45,14 @@ class TestEBPFDataPlane(unittest.TestCase):
         self.assertEqual(status["interface"], "eth0")
         self.assertEqual(len(status["active_table"]), 2)
 
+
         # Check serialized attributes
         entry0 = status["active_table"][0]
         self.assertEqual(entry0["id"], "s1")
         self.assertEqual(entry0["port"], 8080)
         self.assertEqual(entry0["temperature"], 250)  # fixed-point * 1000
         self.assertEqual(entry0["weight"], 1)
+        
 
     def test_cluster_ebpf_integration_and_rotation(self):
         """HuddleCluster syncs eBPF map on initialization, rotation, and sync_ebpf()."""

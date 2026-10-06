@@ -6,6 +6,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 
 
+## [4.24.0] - 2026-10-06
+
+### Added
+- `RingStats` dataclass — per-ring packet count, byte count, average temperature,
+  and server ID list; returned by `get_ring_stats()`.
+- `XDPCounters` dataclass — XDP action breakdown (`xdp_pass`, `xdp_tx`, `xdp_drop`,
+  `xdp_redirect`, `drop_rate_pct`); returned by `get_xdp_counters()`.
+- `EBPFDataPlane.get_ring_stats()` — returns inner and outer ring stats in one call,
+  reading directly from the virtual BPF map.
+- `EBPFDataPlane.get_xdp_counters()` — returns current XDP action counters with
+  automatic `drop_rate_pct` calculation.
+- `EBPFDataPlane.sync_outer_ring()` — mirrors outer cooling-ring servers so their
+  stats appear in `get_ring_stats()["outer"]`.
+- `EBPFDataPlane.record_bytes()` — accumulate byte counts per server ID without
+  needing the BPF map index.
+- `EBPFDataPlane.record_xdp_action()` — bulk-update XDP pass/tx/drop/redirect
+  counters (mirrors a kernel-side readout).
+- `EBPFDataPlane.record_latency_us()` — feed microsecond latency samples into a
+  Prometheus-style latency histogram.
+- `EBPFDataPlane.get_latency_histogram()` — returns latency bucket counts as a
+  JSON-serialisable dict (`le_50us`, `le_100us`, …, `le_inf`).
+- `EBPFDataPlane.get_server_bytes()` — per-server cumulative bytes routed.
+- `EBPFDataPlane.reset_counters()` — zeros all telemetry counters (packets, bytes,
+  XDP actions, latency histogram) while preserving ring membership.
+- `record_forwarded_packet()` now accepts an optional `byte_count` argument and
+  automatically increments `xdp_tx` and per-server byte tracking.
+- `telemetry_status()` now includes `total_bytes_forwarded`.
+
+**Tests**
+- `tests/test_ebpf_ring_stats.py` — 30 new tests across 8 test classes covering
+  RingStats, XDPCounters, get_ring_stats(), get_xdp_counters(), record_bytes(),
+  latency histogram bucketing, reset_counters(), and backward compatibility.
+
+---
+
+
 ## [4.22.0] - 2026-09-20
 
 ### Added — Autonomous Thermal Auto-Remediation & Self-Healing Engine
