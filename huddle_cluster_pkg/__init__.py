@@ -78,9 +78,11 @@ from huddle_cluster_pkg.hardware_sensors            import (
     HardwareTelemetryManager,
     HardwareSensorReader,
     HardwareTelemetry,
+    GPUSensorReader,
+    _GPUDeviceStats,
 )
 
-__version__ = "4.24.0"
+__version__ = "4.25.0"
 
 __all__ = [
     "__version__",
@@ -95,5 +97,5 @@ __all__ = [
     "RemediationActionType", "RemediationTrigger",
     "RemediationState",
     "HardwareTelemetryManager", "HardwareSensorReader",
-    "HardwareTelemetry",
+    "HardwareTelemetry", "GPUSensorReader", "_GPUDeviceStats",
 ]

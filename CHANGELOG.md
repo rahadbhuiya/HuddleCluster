@@ -6,6 +6,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 
 
+## [4.25.0] - 2026-10-13
+
+### Added
+- `GPUSensorReader` class — dedicated multi-GPU reader with NVML and nvidia-smi backends:
+  - `gpu_count()` — number of NVIDIA GPUs detected on the host.
+  - `read_all_gpus()` — per-device stats for every GPU (`_GPUDeviceStats` list).
+  - `get_gpu_summary()` — aggregated stats: max temp, avg temp, max utilization,
+    total VRAM, used VRAM, max VRAM ratio, total power draw.
+  - `gpu_eviction_score()` — single [0, 1] pressure score fusing temp + VRAM + power
+    across all GPUs; worst device dominates.
+  - `should_evict_for_gpu()` — boolean guard; True when any GPU exceeds the
+    temperature or VRAM saturation threshold.
+- `_GPUDeviceStats` dataclass — raw per-device readings (index, name, temp, util,
+  VRAM, power).
+- `HardwareTelemetry` gains two new fields: `gpu_count` and `gpu_eviction_score`.
+- `HardwareTelemetryManager.record_telemetry()` now accepts `gpu_count` and
+  `gpu_eviction_score` kwargs; both appear in `telemetry_status()`.
+- `HardwareTelemetryManager.get_overheated_servers(threshold)` — returns list of
+  server IDs whose `gpu_eviction_score` exceeds the threshold; use to proactively
+  rotate GPU-saturated servers to the outer cooling ring.
+- `HardwareSensorReader` internally delegates GPU reads to `GPUSensorReader` for
+  consistency; existing public API is fully backward compatible.
+
+**Tests**
+- `tests/test_gpu_sensors.py` — 36 tests across 12 test classes covering
+  `GPUSensorReader`, `get_gpu_summary()`, `gpu_eviction_score()`,
+  `should_evict_for_gpu()`, new `HardwareTelemetry` fields, manager helpers,
+  backward compat, and no-GPU fallback. All tests use `unittest.mock` — no
+  physical GPU required.
+
+---
+
+
 ## [4.24.0] - 2026-10-06
 
 ### Added
