@@ -81,8 +81,23 @@ from huddle_cluster_pkg.hardware_sensors            import (
     GPUSensorReader,
     _GPUDeviceStats,
 )
+from huddle_cluster_pkg.wan_simulator               import (
+    WanLatencySimulator,
+    LatencyProfile,
+    TransmissionReport,
+    WanPacketLossException,
+    WanConnectionTimeoutException,
+    WanDataCorruptedException,
+    PRESET_LOCAL_LAN,
+    PRESET_INTRA_REGION,
+    PRESET_TRANSATLANTIC,
+    PRESET_TRANSPACIFIC,
+    PRESET_CROSS_CONTINENT,
+    PRESET_DEGRADED_WAN,
+    PRESET_HIGH_LOSS,
+)
 
-__version__ = "4.25.0"
+__version__ = "4.26.0"
 
 __all__ = [
     "__version__",
@@ -98,4 +113,8 @@ __all__ = [
     "RemediationState",
     "HardwareTelemetryManager", "HardwareSensorReader",
     "HardwareTelemetry", "GPUSensorReader", "_GPUDeviceStats",
+    "WanLatencySimulator", "LatencyProfile", "TransmissionReport",
+    "WanPacketLossException", "WanConnectionTimeoutException", "WanDataCorruptedException",
+    "PRESET_LOCAL_LAN", "PRESET_INTRA_REGION", "PRESET_TRANSATLANTIC",
+    "PRESET_TRANSPACIFIC", "PRESET_CROSS_CONTINENT", "PRESET_DEGRADED_WAN", "PRESET_HIGH_LOSS",
 ]

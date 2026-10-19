@@ -6,6 +6,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 
 
+## [4.26.0] - 2026-10-20
+
+### Added
+- `WanLatencySimulator` engine — high-fidelity cross-region network degradation simulator (NLnet Milestone 2):
+  - Topology configuration via `set_link(from_region, to_region, profile, symmetric)`.
+  - Statistical delay calculation (`calculate_delay_ms`) supporting Gaussian & uniform jitter models and bandwidth serialisation delays.
+  - Stochastic packet drop (`evaluate_loss`) and data corruption (`evaluate_corruption`).
+  - `simulate_transmission()` returning detailed `TransmissionReport` telemetry.
+  - `transmit()` wrapper injecting latency into arbitrary callables and raising `WanPacketLossException` or `WanDataCorruptedException`.
+  - `attach_to_ha()` interceptor enabling seamless simulation of WAN packet delay and loss directly on Raft consensus RPCs in `ClusterHA`.
+  - Telemetry reporting via `get_metrics()` and counter management via `reset_metrics()`.
+- `LatencyProfile` dataclass specifying `mean_latency_ms`, `jitter_ms`, `packet_loss_rate`, `bandwidth_mbps`, and `corruption_rate`.
+- Industry-standard network presets: `PRESET_LOCAL_LAN`, `PRESET_INTRA_REGION`, `PRESET_TRANSATLANTIC`, `PRESET_TRANSPACIFIC`, `PRESET_CROSS_CONTINENT`, `PRESET_DEGRADED_WAN`, and `PRESET_HIGH_LOSS`.
+- `demos/run_wan_demo.py` showcasing multi-region link topology setup, simulated RPC packet traffic, and link-level metrics aggregation.
+
+**Tests**
+- `tests/test_wan_simulator.py` — 26 unit tests across 8 test classes covering parameter bounds, topology mapping, statistical jitter, stochastic loss, Raft HA attachment, and metrics.
+
+---
+
+
 ## [4.25.0] - 2026-10-13
 
 ### Added
