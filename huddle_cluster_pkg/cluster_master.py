@@ -1491,11 +1491,27 @@ setInterval(refresh, 3000);
 
             def _check_leader(self) -> bool:
                 """
-                If HA is enabled and this node is not the leader, send a
-                307 redirect with X-Leader-URL and return False so the
-                caller can short-circuit. Returns True if OK to proceed.
+                If HA is enabled and this node is in read-only partition mode,
+                reject with 503 to prevent split-brain writes. If this node is
+                not the leader, send a 307 redirect with X-Leader-URL and return
+                False so the caller can short-circuit. Returns True if OK to proceed.
                 """
-                if master._ha is None or master._ha.is_leader():
+                if master._ha is None:
+                    return True
+                if master._ha.is_readonly():
+                    body = json.dumps({
+                        "ok": False,
+                        "error": "cluster partition detected — master is in read-only mode to prevent split-brain",
+                        "split_brain": True,
+                        "partition_state": master._ha.partition_state(),
+                    }).encode()
+                    self.send_response(503)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return False
+                if master._ha.is_leader():
                     return True
                 leader_url = master._ha.leader_url()
                 body = json.dumps({

@@ -55,10 +55,17 @@ FOLLOWER  = "follower"
 CANDIDATE = "candidate"
 LEADER    = "leader"
 
+#  Partition & Split-brain states (v4.27.0) 
+PARTITION_HEALTHY           = "healthy"
+PARTITION_MAJORITY_ACTIVE   = "majority_active"
+PARTITION_ISOLATED_MINORITY = "isolated_minority"
+PARTITION_HEALING           = "healing"
+
 
 class ClusterHA:
     """
-    Simplified Raft HA layer.  Attach to a MasterNode::
+    Simplified Raft HA layer with Split-Brain Detection & Auto-Healing (v4.27.0).
+    Attach to a MasterNode::
 
         from huddle_cluster_pkg import MasterNode
         from huddle_cluster_pkg.cluster_ha import ClusterHA
@@ -80,6 +87,8 @@ class ClusterHA:
         sync_interval_sec: float = 1.0,
         request_timeout_sec: float = 1.0,
         state_file: Optional[str] = None,
+        quorum_timeout_sec: Optional[float] = None,
+        auto_heal_enabled: bool = True,
     ) -> None:
         """
         Args:
@@ -104,6 +113,13 @@ class ClusterHA:
                                     which is a real (if narrow) Raft safety
                                     violation. Strongly recommended for any
                                     production HA deployment.
+            quorum_timeout_sec:     Max elapsed time leader may run without a
+                                    confirmed peer quorum before entering
+                                    read-only split-brain guard. Defaults to
+                                    1.5 * election_timeout_sec.
+            auto_heal_enabled:      When True, nodes in partition/read-only mode
+                                    automatically heal and resume when quorum or
+                                    majority leader connectivity returns.
         """
         self._id               = node_id
         self._peers            = list(peers or [])
@@ -121,6 +137,22 @@ class ClusterHA:
         self._leader_id: Optional[str] = None
         self._leader_url: Optional[str] = None
         self._votes_received: set = set()
+
+        #  Split-Brain & Partition State (v4.27.0) 
+        self._quorum_timeout_sec = (
+            quorum_timeout_sec
+            if quorum_timeout_sec is not None
+            else (self._base_timeout * 1.5)
+        )
+        self._auto_heal_enabled  = auto_heal_enabled
+        self._readonly           = False
+        self._readonly_reason: Optional[str] = None
+        self._split_brain_detected = False
+        self._last_quorum_time   = time.time()
+        self._active_peers: set  = set()
+        self._partition_state    = PARTITION_HEALTHY
+        self._split_brain_count  = 0
+        self._heal_count         = 0
 
         if self._state_file:
             self._load_persisted_state()
@@ -244,6 +276,9 @@ class ClusterHA:
 
     def is_leader(self) -> bool:
         with self._lock:
+            # If in read-only mode or split-brain detected, refuse leader authority
+            if self._readonly or self._split_brain_detected:
+                return False
             return self._role == LEADER
 
     def is_ready(self) -> bool:
@@ -252,16 +287,130 @@ class ClusterHA:
           - Node is LEADER (actively serving and coordinating)
           - Node is FOLLOWER and has identified an active leader
           - Standalone node (no peers)
-        Returns False if CANDIDATE (election in progress) or uncoordinated FOLLOWER.
+        Returns False if:
+          - CANDIDATE (election in progress) or uncoordinated FOLLOWER
+          - Node is in read-only mode or isolated minority partition
         """
         with self._lock:
             if not self._running:
+                return False
+            if self._readonly or self._partition_state == PARTITION_ISOLATED_MINORITY:
                 return False
             if self._role == LEADER:
                 return True
             if self._role == FOLLOWER:
                 return (not self._peers) or (self._leader_id is not None)
             return False
+
+    def is_readonly(self) -> bool:
+        """Return True if node is demoted to read-only due to partition or split-brain."""
+        with self._lock:
+            return self._readonly
+
+    def is_split_brain(self) -> bool:
+        """Return True if node has detected a cluster partition / split-brain hazard."""
+        with self._lock:
+            return self._split_brain_detected
+
+    def partition_state(self) -> str:
+        """Return current partition status ('healthy', 'majority_active', 'isolated_minority', 'healing')."""
+        with self._lock:
+            return self._partition_state
+
+    def has_quorum(self) -> bool:
+        """Return True if this node currently observes majority quorum."""
+        with self._lock:
+            if not self._peers:
+                return True
+            needed = (len(self._peers) + 1) // 2 + 1
+            if self._role == LEADER:
+                return (len(self._active_peers) + 1) >= needed
+            # For follower: has active leader within timeout and not marked isolated
+            recent_hb = (time.time() - self._last_hb) <= (self._base_timeout * 2)
+            return (self._leader_id is not None) and recent_hb and (not self._readonly)
+
+    def detect_split_brain(self) -> Dict[str, Any]:
+        """
+        Comprehensive diagnostic inspection of cluster partition and quorum health.
+        """
+        with self._lock:
+            needed = (len(self._peers) + 1) // 2 + 1
+            has_q = self.has_quorum()
+            return {
+                "is_split_brain":       self._split_brain_detected,
+                "is_readonly":          self._readonly,
+                "readonly_reason":      self._readonly_reason,
+                "partition_state":      self._partition_state,
+                "has_quorum":           has_q,
+                "role":                 self._role,
+                "reachable_peers":      sorted(self._active_peers),
+                "reachable_peer_count": len(self._active_peers),
+                "required_quorum":      needed,
+                "total_cluster_size":   len(self._peers) + 1,
+                "split_brain_count":    self._split_brain_count,
+                "heal_count":           self._heal_count,
+            }
+
+    def enter_readonly_mode(self, reason: str = "manual") -> None:
+        """
+        Place node into safe read-only mode to prevent stale or conflicting writes.
+        If current role is LEADER, steps down to FOLLOWER.
+        """
+        with self._lock:
+            self._readonly = True
+            self._readonly_reason = reason
+            self._split_brain_detected = True
+            self._partition_state = PARTITION_ISOLATED_MINORITY
+            if self._role == LEADER:
+                logger.warning(
+                    "HA '%s': entering read-only mode (%s) — stepping down from leader",
+                    self._id, reason,
+                )
+                self._role = FOLLOWER
+                self._leader_id = None
+                self._leader_url = None
+                self._reset_timeout()
+            else:
+                logger.warning(
+                    "HA '%s': entering read-only mode (%s)", self._id, reason
+                )
+
+    def exit_readonly_mode(self) -> None:
+        """Manually or programmatically lift read-only mode."""
+        with self._lock:
+            self._readonly = False
+            self._readonly_reason = None
+            self._split_brain_detected = False
+            self._partition_state = PARTITION_HEALTHY
+            logger.info("HA '%s': exited read-only mode", self._id)
+
+    def auto_heal(self) -> bool:
+        """
+        Attempt auto-healing by checking if quorum or legitimate leader has returned.
+        Returns True if healed, False otherwise.
+        """
+        with self._lock:
+            if not self._auto_heal_enabled:
+                return False
+            if not (self._readonly or self._split_brain_detected):
+                return True
+            # If standalone or connected to a legitimate leader
+            if not self._peers or (self._leader_id is not None and (time.time() - self._last_hb <= self._base_timeout * 2)):
+                self._trigger_auto_heal("leader_heartbeat_verified")
+                return True
+            return False
+
+    def _trigger_auto_heal(self, reason: str, leader_id: Optional[str] = None) -> None:
+        """Caller must hold self._lock (or call from single-threaded lock context)."""
+        self._readonly = False
+        self._readonly_reason = None
+        self._split_brain_detected = False
+        self._partition_state = PARTITION_HEALTHY
+        self._heal_count += 1
+        logger.info(
+            "HA '%s': AUTO-HEAL SUCCEEDED (%s, leader=%s). Normal cluster operations restored.",
+            self._id, reason, leader_id or self._leader_id,
+        )
 
     def role(self) -> str:
         with self._lock:
@@ -273,15 +422,26 @@ class ClusterHA:
 
     def status(self) -> Dict[str, Any]:
         with self._lock:
+            needed = (len(self._peers) + 1) // 2 + 1
+            has_q = self.has_quorum()
             return {
-                "node_id":    self._id,
-                "role":       self._role,
-                "term":       self._term,
-                "leader_id":  self._leader_id,
-                "leader_url": self._leader_url,
-                "peers":      self._peers,
-                "peer_count": len(self._peers),
-                "self_url":   getattr(self, "_self_url", None),
+                "node_id":              self._id,
+                "role":                 self._role,
+                "term":                 self._term,
+                "leader_id":            self._leader_id,
+                "leader_url":           self._leader_url,
+                "peers":                self._peers,
+                "peer_count":           len(self._peers),
+                "self_url":             getattr(self, "_self_url", None),
+                "readonly":             self._readonly,
+                "readonly_reason":      self._readonly_reason,
+                "split_brain":          self._split_brain_detected,
+                "partition_state":      self._partition_state,
+                "has_quorum":           has_q,
+                "reachable_peer_count": len(self._active_peers),
+                "required_quorum":      needed,
+                "split_brain_count":    self._split_brain_count,
+                "heal_count":           self._heal_count,
             }
 
     
@@ -332,6 +492,10 @@ class ClusterHA:
             self._leader_url = leader_url
             self._role       = FOLLOWER
             self._reset_timeout()
+
+            # Auto-heal from partition/read-only mode when reconnected to legitimate leader
+            if self._auto_heal_enabled and (self._readonly or self._split_brain_detected):
+                self._trigger_auto_heal("reconnected_to_leader", leader_id)
 
         if state_snapshot is not None:
             self._apply_snapshot(state_snapshot)
@@ -490,6 +654,8 @@ class ClusterHA:
                     continue
                 term = self._term
 
+            active_in_round: set = set()
+            stepped_down = False
             for peer_url in self._peers:
                 try:
                     resp = self._rpc_post(
@@ -503,9 +669,42 @@ class ClusterHA:
                     if resp.get("term", 0) > term:
                         with self._lock:
                             self._step_down(resp["term"])
+                        stepped_down = True
                         break
+                    if resp.get("success"):
+                        active_in_round.add(peer_url)
                 except Exception:
                     pass   # peer unreachable
+
+            if stepped_down:
+                continue
+
+            # Quorum & Split-Brain Evaluation (v4.27.0)
+            with self._lock:
+                if self._role != LEADER:
+                    continue
+                self._active_peers = active_in_round
+                needed = (len(self._peers) + 1) // 2 + 1
+                total_reachable = len(active_in_round) + 1  # includes self
+
+                if total_reachable >= needed:
+                    self._last_quorum_time = time.time()
+                    if self._split_brain_detected or self._readonly:
+                        self._trigger_auto_heal("quorum_restored")
+                    else:
+                        self._partition_state = (
+                            PARTITION_HEALTHY
+                            if len(active_in_round) == len(self._peers)
+                            else PARTITION_MAJORITY_ACTIVE
+                        )
+                else:
+                    # Minority partition! Check quorum timeout
+                    elapsed = time.time() - self._last_quorum_time
+                    if elapsed >= self._quorum_timeout_sec:
+                        self._split_brain_count += 1
+                        self.enter_readonly_mode(
+                            f"quorum_lost_{total_reachable}_of_{needed}_nodes_reachable"
+                        )
 
     
     # State-sync loop (leader only)

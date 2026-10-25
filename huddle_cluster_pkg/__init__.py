@@ -59,7 +59,16 @@ from huddle_cluster_pkg.cluster_scheduler         import ClusterScheduler
 from huddle_cluster_pkg.cluster_autoscaler        import ClusterAutoScaler
 from huddle_cluster_pkg.cluster_rolling_updater   import ClusterRollingUpdater
 from huddle_cluster_pkg.cluster_service_discovery import ServiceDiscovery
-from huddle_cluster_pkg.cluster_ha                import ClusterHA
+from huddle_cluster_pkg.cluster_ha                import (
+    ClusterHA,
+    FOLLOWER,
+    CANDIDATE,
+    LEADER,
+    PARTITION_HEALTHY,
+    PARTITION_MAJORITY_ACTIVE,
+    PARTITION_ISOLATED_MINORITY,
+    PARTITION_HEALING,
+)
 from huddle_cluster_pkg.cluster_multi_region      import MultiRegionManager
 from huddle_cluster_pkg.cluster_circuit_breaker   import ClusterCircuitBreaker
 from huddle_cluster_pkg.cluster_rate_limiter        import ClusterRateLimiter
@@ -97,7 +106,7 @@ from huddle_cluster_pkg.wan_simulator               import (
     PRESET_HIGH_LOSS,
 )
 
-__version__ = "4.26.0"
+__version__ = "4.27.0"
 
 __all__ = [
     "__version__",
@@ -117,4 +126,5 @@ __all__ = [
     "WanPacketLossException", "WanConnectionTimeoutException", "WanDataCorruptedException",
     "PRESET_LOCAL_LAN", "PRESET_INTRA_REGION", "PRESET_TRANSATLANTIC",
     "PRESET_TRANSPACIFIC", "PRESET_CROSS_CONTINENT", "PRESET_DEGRADED_WAN", "PRESET_HIGH_LOSS",
+    "PARTITION_HEALTHY", "PARTITION_MAJORITY_ACTIVE", "PARTITION_ISOLATED_MINORITY", "PARTITION_HEALING",
 ]

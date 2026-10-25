@@ -6,6 +6,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 
 
+## [4.27.0] - 2026-10-27
+
+### Added
+- **Split-Brain Detection & Auto-Healing Engine** in `ClusterHA` (NLnet Milestone 2):
+  - **Quorum Lease Heartbeat Tracking**: Leaders track active heartbeat acknowledgments from peers; if quorum is lost for longer than `quorum_timeout_sec` (e.g. isolated network partition), the leader automatically demotes to read-only follower mode, preventing dual-leader split-brain scenarios.
+  - **Safe Read-Only Mode**: `enter_readonly_mode(reason)` demotes the node and marks it read-only. `is_leader()` and `is_ready()` actively guard against accepting writes while isolated.
+  - **MasterNode Partition Guard**: `MasterNode` write operations return `HTTP 503 Service Unavailable` with `split_brain: true` and partition state diagnostics whenever the node is in a partition-induced read-only state.
+  - **Autonomous Auto-Healing**: When network connectivity restores and append-entries heartbeats arrive from the legitimate majority leader, `_trigger_auto_heal()` automatically lifts read-only mode, synchronises cluster snapshot state, and increments `heal_count`.
+  - **Partition State Machine**: States `PARTITION_HEALTHY`, `PARTITION_MAJORITY_ACTIVE`, `PARTITION_ISOLATED_MINORITY`, and `PARTITION_HEALING`.
+  - **Diagnostic API**: `detect_split_brain()` returns full partition health, reachable peer count, required quorum, and incident counters; exposed via `/v1/ha/status`.
+  - Configurable `quorum_timeout_sec` and `auto_heal_enabled` flags on `ClusterHA`.
+
+**Tests**
+- `tests/test_split_brain.py` — 14 unit tests across 8 test classes covering quorum lease expiry, manual read-only transitions, readiness rejection, heartbeat auto-healing, and master write prevention.
+
+---
+
+
 ## [4.26.0] - 2026-10-20
 
 ### Added
