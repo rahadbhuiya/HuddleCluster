@@ -29,6 +29,7 @@ import time
 import urllib.parse
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional
+from huddle_cluster_pkg.auth import JWTManager, JWTAuthError, JWTExpiredError, TokenClaims
 
 logger = logging.getLogger(__name__)
 
@@ -292,6 +293,9 @@ class MasterNode:
         on_node_purged: Optional[Callable[[NodeRecord], None]] = None,
         on_cluster_unhealthy: Optional[Callable[[Dict[str, Any]], None]] = None,
         on_cluster_recovered: Optional[Callable[[Dict[str, Any]], None]] = None,
+        jwt_secret: Optional[str] = None,
+        jwt_users: Optional[Dict[str, Any]] = None,
+        jwt_manager: Optional[Any] = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -315,6 +319,13 @@ class MasterNode:
 
         self._api_keys = api_keys
         self._api_key_permissions = _resolve_api_key_permissions(api_keys)
+        if jwt_manager is not None:
+            self._jwt_manager = jwt_manager
+        elif jwt_secret is not None or jwt_users is not None:
+            self._jwt_manager = JWTManager(secret_key=jwt_secret)
+        else:
+            self._jwt_manager = None
+        self._jwt_users = jwt_users or {}
 
         if bool(tls_certfile) != bool(tls_keyfile):
             raise ValueError(
@@ -1571,49 +1582,62 @@ setInterval(refresh, 3000);
             def _check_auth(self, required_permission: str) -> bool:
                 """
                 Returns True if the request is authorized to proceed.
-                If not, sends the 401/403 response itself and returns False.
-                When master._api_keys is None, auth is disabled entirely
-                and this always returns True (open API, same as before
-                RBAC existed).
-
-                required_permission is a scope string like "nodes:read"
-                or "canary:control" (see _ALL_PERMISSIONS) — as of
-                v4.15.0, no longer just "viewer"/"admin". Keys granted
-                the "admin"/"viewer" role string still work exactly as
-                before (those roles expand to a scope bundle at
-                construction time); keys granted a specific list of
-                scopes are checked against that list directly.
+                Supports both cryptographic JWT tokens and static API keys.
                 """
-                if master._api_keys is None:
+                if master._api_keys is None and master._jwt_manager is None:
                     return True
 
                 header = self.headers.get("Authorization", "")
                 if not header.startswith("Bearer "):
                     self._send_json(401, {
                         "ok": False,
-                        "error": "missing Authorization header (expected 'Bearer <api_key>')"
+                        "error": "missing Authorization header (expected 'Bearer <token>')"
                     })
                     return False
 
-                key   = header[len("Bearer "):].strip()
-                scopes = master._api_key_permissions.get(key)
-                if scopes is None:
-                    logger.warning("Rejected request: invalid API key")
-                    self._send_json(401, {"ok": False, "error": "invalid API key"})
-                    return False
+                token = header[len("Bearer "):].strip()
 
-                if required_permission not in scopes:
-                    logger.warning(
-                        "Rejected request: key lacks '%s' permission",
-                        required_permission,
-                    )
-                    self._send_json(403, {
-                        "ok": False,
-                        "error": f"this API key lacks required '{required_permission}' permission"
-                    })
-                    return False
+                # 1. If JWT is enabled, attempt JWT validation first
+                if master._jwt_manager is not None:
+                    try:
+                        claims = master._jwt_manager.decode_and_verify(token, expected_type="access")
+                        if not claims.has_permission(required_permission):
+                            logger.warning(
+                                "Rejected JWT request: '%s' lacks '%s' permission",
+                                claims.sub, required_permission,
+                            )
+                            self._send_json(403, {
+                                "ok": False,
+                                "error": f"token lacks required '{required_permission}' permission"
+                            })
+                            return False
+                        self._claims = claims
+                        return True
+                    except JWTExpiredError:
+                        self._send_json(401, {"ok": False, "error": "token expired", "code": "token_expired"})
+                        return False
+                    except JWTAuthError:
+                        pass
 
-                return True
+                # 2. Check static API key table
+                if master._api_key_permissions is not None:
+                    scopes = master._api_key_permissions.get(token)
+                    if scopes is not None:
+                        if required_permission not in scopes:
+                            logger.warning(
+                                "Rejected request: key lacks '%s' permission",
+                                required_permission,
+                            )
+                            self._send_json(403, {
+                                "ok": False,
+                                "error": f"this API key lacks required '{required_permission}' permission"
+                            })
+                            return False
+                        return True
+
+                logger.warning("Rejected request: invalid API key or token")
+                self._send_json(401, {"ok": False, "error": "invalid API key or token"})
+                return False
 
             def _tls_client_cn(self) -> Optional[str]:
                 """
@@ -1665,6 +1689,16 @@ setInterval(refresh, 3000);
 
                 elif path == f"{_API_V1}/openapi.json":
                     self._send_json(200, master.openapi_spec())   # never requires auth
+
+                elif path == f"{_API_V1}/auth/me":
+                    if not self._check_auth("status:read"):
+                        return
+                    claims = getattr(self, "_claims", None)
+                    if claims:
+                        self._send_json(200, claims.to_dict())
+                    else:
+                        self._send_json(200, {"sub": "api-key-user", "auth_method": "static_key"})
+                    return
 
                 elif path == f"{_API_V1}/ha/status":
                     if master._ha is None:
@@ -2057,6 +2091,48 @@ setInterval(refresh, 3000);
                         state_snapshot=body.get("state_snapshot"),
                     )
                     self._send_json(200, result)
+                    return
+
+                elif path == f"{_API_V1}/auth/token":
+                    body = self._read_json()
+                    if body is None:
+                        self._send_json(400, {"ok": False, "error": "invalid JSON"})
+                        return
+                    if master._jwt_manager is None:
+                        self._send_json(503, {"ok": False, "error": "JWT authentication not configured on master"})
+                        return
+                    username = body.get("username") or body.get("client_id")
+                    password = body.get("password") or body.get("client_secret")
+                    if not username or not password:
+                        self._send_json(400, {"ok": False, "error": "username and password required"})
+                        return
+                    user_conf = master._jwt_users.get(username)
+                    if not user_conf or user_conf.get("password") != password:
+                        self._send_json(401, {"ok": False, "error": "invalid credentials"})
+                        return
+                    role = user_conf.get("role", "viewer")
+                    scopes = user_conf.get("scopes")
+                    tokens = master._jwt_manager.create_token_pair(sub=username, role=role, scopes=scopes)
+                    self._send_json(200, tokens)
+                    return
+
+                elif path == f"{_API_V1}/auth/refresh":
+                    body = self._read_json()
+                    if body is None:
+                        self._send_json(400, {"ok": False, "error": "invalid JSON"})
+                        return
+                    if master._jwt_manager is None:
+                        self._send_json(503, {"ok": False, "error": "JWT authentication not configured on master"})
+                        return
+                    refresh_token = body.get("refresh_token")
+                    if not refresh_token:
+                        self._send_json(400, {"ok": False, "error": "refresh_token required"})
+                        return
+                    try:
+                        tokens = master._jwt_manager.refresh(refresh_token)
+                        self._send_json(200, tokens)
+                    except JWTAuthError as exc:
+                        self._send_json(401, {"ok": False, "error": str(exc)})
                     return
 
                 #  All other POSTs are write operations — check leader 

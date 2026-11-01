@@ -106,7 +106,17 @@ from huddle_cluster_pkg.wan_simulator               import (
     PRESET_HIGH_LOSS,
 )
 
-__version__ = "4.27.0"
+from huddle_cluster_pkg.auth import (
+    JWTManager,
+    TokenClaims,
+    JWTAuthError,
+    JWTExpiredError,
+    JWTInvalidSignatureError,
+    JWTFormatError,
+    JWTInvalidClaimsError,
+)
+
+__version__ = "4.28.0"
 
 __all__ = [
     "__version__",
@@ -127,4 +137,6 @@ __all__ = [
     "PRESET_LOCAL_LAN", "PRESET_INTRA_REGION", "PRESET_TRANSATLANTIC",
     "PRESET_TRANSPACIFIC", "PRESET_CROSS_CONTINENT", "PRESET_DEGRADED_WAN", "PRESET_HIGH_LOSS",
     "PARTITION_HEALTHY", "PARTITION_MAJORITY_ACTIVE", "PARTITION_ISOLATED_MINORITY", "PARTITION_HEALING",
+    "JWTManager", "TokenClaims", "JWTAuthError", "JWTExpiredError",
+    "JWTInvalidSignatureError", "JWTFormatError", "JWTInvalidClaimsError",
 ]

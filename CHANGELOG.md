@@ -6,10 +6,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 
 
+## [4.28.0] - 2026-11-03
+
+### Added
+- **Cryptographic JWT Authentication & RBAC Middleware** (`huddle_cluster_pkg/auth.py`):
+  - Standard-library RFC 7519 JWT implementation using HMAC-SHA256 (HS256) with zero external pip dependencies.
+  - `JWTManager` engine for issuing cryptographically signed access tokens and refresh tokens.
+  - Constant-time signature verification, token expiration enforcement (`exp`), and clock skew leeway.
+  - Scope-based RBAC claims model (`sub`, `role`, `scopes`) integrating with existing resource-level permissions.
+  - `POST /v1/auth/token` endpoint for credentials-to-token issuance.
+  - `POST /v1/auth/refresh` endpoint for zero-downtime access token rotation.
+  - `GET /v1/auth/me` diagnostic endpoint returning decoded token identity and active scopes.
+  - Full backward compatibility: legacy static API keys work seamlessly alongside JWT Bearer tokens.
+
+**Tests**
+- `tests/test_jwt_auth.py` — 17 unit and integration tests covering signature validation, tampering rejection, token expiration, refresh lifecycle, scope permissions, and live REST API endpoints.
+
+---
+
 ## [4.27.0] - 2026-10-27
 
 ### Added
-- **Split-Brain Detection & Auto-Healing Engine** in `ClusterHA` (NLnet Milestone 2):
+- **Split-Brain Detection & Auto-Healing Engine** in `ClusterHA`:
   - **Quorum Lease Heartbeat Tracking**: Leaders track active heartbeat acknowledgments from peers; if quorum is lost for longer than `quorum_timeout_sec` (e.g. isolated network partition), the leader automatically demotes to read-only follower mode, preventing dual-leader split-brain scenarios.
   - **Safe Read-Only Mode**: `enter_readonly_mode(reason)` demotes the node and marks it read-only. `is_leader()` and `is_ready()` actively guard against accepting writes while isolated.
   - **MasterNode Partition Guard**: `MasterNode` write operations return `HTTP 503 Service Unavailable` with `split_brain: true` and partition state diagnostics whenever the node is in a partition-induced read-only state.
@@ -27,7 +45,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [4.26.0] - 2026-10-20
 
 ### Added
-- `WanLatencySimulator` engine — high-fidelity cross-region network degradation simulator (NLnet Milestone 2):
+- `WanLatencySimulator` engine — high-fidelity cross-region network degradation simulator:
   - Topology configuration via `set_link(from_region, to_region, profile, symmetric)`.
   - Statistical delay calculation (`calculate_delay_ms`) supporting Gaussian & uniform jitter models and bandwidth serialisation delays.
   - Stochastic packet drop (`evaluate_loss`) and data corruption (`evaluate_corruption`).
