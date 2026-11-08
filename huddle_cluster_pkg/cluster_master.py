@@ -30,6 +30,7 @@ import urllib.parse
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 from huddle_cluster_pkg.auth import JWTManager, JWTAuthError, JWTExpiredError, TokenClaims
+from huddle_cluster_pkg.cluster_plugin import PluginRegistry, HuddlePlugin, WebhookAlertPlugin
 
 logger = logging.getLogger(__name__)
 
@@ -296,6 +297,7 @@ class MasterNode:
         jwt_secret: Optional[str] = None,
         jwt_users: Optional[Dict[str, Any]] = None,
         jwt_manager: Optional[Any] = None,
+        plugins: Optional[List[HuddlePlugin]] = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -326,6 +328,10 @@ class MasterNode:
         else:
             self._jwt_manager = None
         self._jwt_users = jwt_users or {}
+        self._plugin_registry = PluginRegistry(master=self)
+        if plugins:
+            for plug in plugins:
+                self._plugin_registry.register(plug)
 
         if bool(tls_certfile) != bool(tls_keyfile):
             raise ValueError(
@@ -1104,6 +1110,18 @@ setInterval(refresh, 3000);
 </body>
 </html>"""
 
+    def register_plugin(self, plugin: HuddlePlugin) -> None:
+        """Register and activate a HuddlePlugin extension."""
+        self._plugin_registry.register(plugin)
+
+    def unregister_plugin(self, plugin_name: str) -> Optional[HuddlePlugin]:
+        """Unregister and unload a HuddlePlugin extension."""
+        return self._plugin_registry.unregister(plugin_name)
+
+    def list_plugins(self) -> List[Dict[str, Any]]:
+        """List metadata for all active plugins."""
+        return self._plugin_registry.list_plugins()
+
     def openapi_spec(self) -> Dict[str, Any]:
         """
         OpenAPI 3.0.3 specification describing the full REST API, served at
@@ -1698,6 +1716,12 @@ setInterval(refresh, 3000);
                         self._send_json(200, claims.to_dict())
                     else:
                         self._send_json(200, {"sub": "api-key-user", "auth_method": "static_key"})
+                    return
+
+                elif path == f"{_API_V1}/plugins":
+                    if not self._check_auth("status:read"):
+                        return
+                    self._send_json(200, {"plugins": master.list_plugins()})
                     return
 
                 elif path == f"{_API_V1}/ha/status":
@@ -2552,6 +2576,7 @@ setInterval(refresh, 3000);
                     self._on_dead(node)
                 except Exception:
                     logger.exception("on_node_dead callback raised")
+            self._plugin_registry.dispatch_node_dead(node)
 
         for node in purged:
             logger.info(
@@ -2716,6 +2741,7 @@ setInterval(refresh, 3000);
                     self._on_join(new_record)
                 except Exception:
                     logger.exception("on_node_join callback raised")
+            self._plugin_registry.dispatch_node_join(new_record)
         else:
             logger.info("Node '%s' re-joined from %s:%d", node_id, address, port)
 
@@ -2780,6 +2806,7 @@ setInterval(refresh, 3000);
                 except Exception:
                     logger.exception("on_node_quarantined callback raised")
 
+        self._plugin_registry.dispatch_node_heartbeat(node_id, data.get("metrics"))
         return {"ok": True, "node_id": node_id, "heartbeat": heartbeat_count}
 
     def _handle_leave(self, node_id: str) -> Dict:
@@ -2795,6 +2822,7 @@ setInterval(refresh, 3000);
                 self._on_leave(node)
             except Exception:
                 logger.exception("on_node_leave callback raised")
+        self._plugin_registry.dispatch_node_leave(node)
 
         with self._lock:
             self._nodes.pop(node_id, None)

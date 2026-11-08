@@ -24,6 +24,15 @@ HuddleCluster applies this directly to server scheduling. Servers that run hot r
 
 ---
 
+## Architecture & Design Scope
+
+HuddleCluster is engineered as an **Algorithmic Simulation Harness and Intelligent Control-Plane Orchestrator**:
+- **Core Thermal Engine:** Fully operational self-organizing dual-ring balancing, adaptive EMA anomaly scoring, cluster median baseline adaptation, and autonomous cooldown cycling.
+- **Intelligent Control Plane:** Manages high-level routing policies, cluster node admission, multi-region failover, circuit breaking, and health state convergence.
+- **Experimental Lab Harness:** Provides simulation testbeds (WAN latency emulation, hardware/GPU thermal telemetry hooks, and userspace eBPF data-plane control interfaces) designed to stress-test bio-inspired scheduling behavior prior to low-level native offloading.
+
+---
+
 ## Install
 
 ```bash
@@ -190,7 +199,7 @@ Under server failure, P95 latency stays under **86 ms** where NGINX round-robin 
 - Proactive synthetic canary prober with autonomous outer-ring cooldown promotion — v4.18
 - Adaptive request hedging & speculative execution (Tail at Scale) with budget ratio safeguard — v4.19
 - AI / LLM token-aware thermal routing & TTFT streaming latency gateway — v4.20
-- Linux Kernel eBPF / XDP zero-copy high-performance data plane — v4.21
+- Linux Kernel eBPF / XDP data-plane control & userspace emulation harness — v4.21
 - Autonomous thermal auto-remediation & self-healing closed-loop engine — v4.22
 
 ---

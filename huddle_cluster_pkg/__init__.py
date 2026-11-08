@@ -116,7 +116,26 @@ from huddle_cluster_pkg.auth import (
     JWTInvalidClaimsError,
 )
 
-__version__ = "4.28.0"
+from huddle_cluster_pkg.cluster_plugin import (
+    HuddlePlugin,
+    PluginRegistry,
+    WebhookAlertPlugin,
+)
+
+from huddle_cluster_pkg.geo_routing import (
+    GeoRouter,
+    GeoPolicy,
+    GeoCoordinates,
+    UpstreamEndpoint,
+)
+
+from huddle_cluster_pkg.cluster_topology import (
+    ClusterTopologyGraph,
+    TopologyNode,
+    TopologyLink,
+)
+
+__version__ = "4.29.0"
 
 __all__ = [
     "__version__",
@@ -139,4 +158,7 @@ __all__ = [
     "PARTITION_HEALTHY", "PARTITION_MAJORITY_ACTIVE", "PARTITION_ISOLATED_MINORITY", "PARTITION_HEALING",
     "JWTManager", "TokenClaims", "JWTAuthError", "JWTExpiredError",
     "JWTInvalidSignatureError", "JWTFormatError", "JWTInvalidClaimsError",
+    "HuddlePlugin", "PluginRegistry", "WebhookAlertPlugin",
+    "GeoRouter", "GeoPolicy", "GeoCoordinates", "UpstreamEndpoint",
+    "ClusterTopologyGraph", "TopologyNode", "TopologyLink",
 ]

@@ -5,6 +5,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.29.0] - 2026-11-08
+
+### Added
+- **Cluster Topology Graph & Multi-Format Visualizer** (huddle_cluster_pkg/cluster_topology.py):
+  - Directed graph representation of cluster members, regions, roles, thermal tiers, and network links.
+  - Multi-format rendering engine: ASCII terminal tree, JSON structured export (	o_json()), and Graphviz DOT graph export (	o_dot()).
+  - Dynamic edge tracking with inter-node RTT and packet loss percentage.
+- **Adaptive Geo-Routing & Latency-Aware Upstream Selection Engine** (huddle_cluster_pkg/geo_routing.py):
+  - Great-circle geographic distance calculation via Haversine formula (GeoCoordinates.distance_to).
+  - Standard global cloud region coordinates (us-east-1, us-west-1, eu-west-1, eu-central-1, p-southeast-1, p-northeast-1).
+  - Multi-policy traffic routing (LOCAL_FIRST, CLOSEST_LATENCY, BALANCED_GLOBAL) balancing latency, geo-distance, thermal strain, and error penalties.
+  - Dynamic RTT Exponential Moving Average (EMA) smoothing with automated error rate penalization.
+- **Extensible Plugin Architecture & Lifecycle Hook System** (huddle_cluster_pkg/cluster_plugin.py):
+  - Standardized HuddlePlugin abstract interface with thread-safe PluginRegistry engine for dynamic lifecycle hooks (on_load, on_node_join, on_node_heartbeat, on_node_dead, on_thermal_eviction, on_failover).
+  - Strict exception isolation ensuring third-party plugin exceptions do not impact core orchestrator stability.
+  - Reference WebhookAlertPlugin streaming critical cluster events to external HTTP endpoints.
+- **Multi-Region Stress Suite & Benchmark Harness** (enchmarks/restack_benchmark.py):
+  - Multi-threaded validation for adaptive geo-routing, bio-inspired thermal avoidance, and plugin dispatches with percentile latency telemetry.
+
+**Tests**
+- 	ests/test_cluster_topology.py, 	ests/test_geo_routing.py, 	ests/test_plugin_api.py covering topology visualization, geo-routing policies, and plugin registries.
+
+---
 
 ## [4.28.0] - 2026-11-03
 

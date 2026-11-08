@@ -13,6 +13,8 @@ Requirements:
 Skip gracefully if dependencies are missing.
 """
 
+from __future__ import annotations
+
 import sys
 import threading
 import time
