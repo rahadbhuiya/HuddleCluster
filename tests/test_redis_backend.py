@@ -9,6 +9,9 @@ import json
 import threading
 import time
 import unittest
+import pytest
+
+pytest.importorskip("redis", reason="redis package is required for RedisBackend tests")
 
 from huddle_cluster import create_cluster
 from huddle_cluster_pkg.backends_redis import RedisBackend

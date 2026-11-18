@@ -14,7 +14,7 @@ Rotation Rules:
   - No central coordinator needed — threshold-driven, self-organizing
 
 Author : Rahad Bhuiya (inspired by Penguin Biology)
-Version: 4.16.0
+Version: 4.29.0
 License: MIT
 
 Changelog v1.4.0
@@ -126,7 +126,7 @@ from enum import Enum
 from typing import Any, Callable, Generator, Optional
 
 #  Version 
-__version__ = "4.23.0"
+__version__ = "4.29.0"
 __author__  = "Rahad Bhuiya"
 __license__ = "MIT"
 

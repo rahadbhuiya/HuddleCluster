@@ -8,6 +8,9 @@ import threading
 import time
 import unittest
 from unittest.mock import MagicMock, patch, PropertyMock
+import pytest
+
+pytest.importorskip("kubernetes", reason="kubernetes package is required for K8sDiscovery tests")
 
 from huddle_cluster import create_cluster
 from huddle_cluster_pkg.discovery_k8s import K8sDiscovery
