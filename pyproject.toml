@@ -7,7 +7,7 @@ name = "huddle-cluster"
 version = "4.29.0"
 description = "A penguin-inspired self-organizing server load balancer with adaptive thermal eviction — now with master/agent cluster management"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "AGPL-3.0-or-later"
 authors = [{ name = "Rahad Bhuiya", email = "rahadbhuiya2021@gmail.com" }]
 requires-python = ">=3.10"
 dependencies = []
@@ -20,7 +20,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",

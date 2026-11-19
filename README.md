@@ -6,7 +6,7 @@
   <a href="https://pypi.org/project/huddle-cluster/"><img src="https://img.shields.io/pypi/v/huddle-cluster?color=0e7a0e&label=PyPI" alt="PyPI version"/></a>
   <a href="https://pypi.org/project/huddle-cluster/"><img src="https://img.shields.io/pypi/pyversions/huddle-cluster?color=0e7a0e" alt="Python versions"/></a>
   <a href="https://rahadbhuiya.github.io/HuddleCluster/"><img src="https://img.shields.io/badge/website-live%20demo-0e7a0e" alt="Website and Live Demo"/></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"/></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="AGPL-3.0 License"/></a>
   <a href="https://doi.org/10.5281/zenodo.20348019"><img src="https://img.shields.io/badge/DOI-10.5281%2Fzenodo.20348019-blue" alt="DOI"/></a>
   <a href="https://github.com/rahadbhuiya/HuddleCluster/actions"><img src="https://img.shields.io/github/actions/workflow/status/rahadbhuiya/HuddleCluster/ci.yml?label=tests" alt="CI"/></a>
 </p>
@@ -236,4 +236,18 @@ Bhuiya, Rahad (2026). HuddleCluster. Zenodo. https://doi.org/10.5281/zenodo.2034
 
 ---
 
-**Author:** Rahad Bhuiya &nbsp;·&nbsp; **License:** MIT
+## License & Commercial Support
+
+### Open Source (AGPL-3.0)
+HuddleCluster is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0-or-later)**. See [LICENSE](LICENSE) for full details.
+
+Under this license, you are free to inspect, run, modify, and host HuddleCluster. If you modify HuddleCluster or integrate it into network/cloud services, you are legally required to make your complete modified source code publicly available under the AGPL-3.0 license.
+
+### Commercial & Enterprise Licensing
+For organizations that wish to deploy HuddleCluster without AGPL-3.0 copyleft obligations, or require custom integrations, dedicated enterprise clustering SLAs, and high-performance kernel/eBPF acceleration:
+
+- **Commercial Inquiries:** Contact `rahadbhuiya2021@gmail.com` or connect via [Exploidus](https://github.com/Exploidus).
+
+---
+
+**Author:** Rahad Bhuiya &nbsp;·&nbsp; **License:** AGPL-3.0 (with Commercial / Dual-Licensing Support)
